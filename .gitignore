@@ -1,0 +1,6 @@
+.DS_Store
+output/
+*.sage.py
+
+# Obsolete local build artifacts; SageMath remains the canonical implementation.
+target/

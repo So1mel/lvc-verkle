@@ -1,0 +1,154 @@
+{
+  "title": "LVC-Verkle parameter sweep configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "name", "presets"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "format": {
+      "const": "lvc_verkle_sweep_config_v1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "presets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/preset"
+      }
+    }
+  },
+  "$defs": {
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "preset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "lattice", "sample_pre", "tree", "authentication"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "lattice": {
+          "$ref": "#/$defs/lattice"
+        },
+        "sample_pre": {
+          "$ref": "#/$defs/sample_pre"
+        },
+        "tree": {
+          "$ref": "#/$defs/tree"
+        },
+        "authentication": {
+          "$ref": "#/$defs/authentication"
+        }
+      }
+    },
+    "lattice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "q", "base", "m_bar"],
+      "properties": {
+        "n": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "q": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "base": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "m_bar": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "sample_pre": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["beta", "sigma_pre", "omega_factor", "tail_cutoff"],
+      "properties": {
+        "beta": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "sigma_pre": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "omega_factor": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "tail_cutoff": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branching_factor", "height"],
+      "properties": {
+        "branching_factor": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "height": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "challenge_modulus",
+        "sigma_mask",
+        "beta_response",
+        "max_attempts",
+        "nonce_bytes",
+        "mask_tail_cutoff"
+      ],
+      "properties": {
+        "challenge_modulus": {
+          "type": "integer",
+          "minimum": 3,
+          "not": {
+            "multipleOf": 2
+          }
+        },
+        "sigma_mask": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "beta_response": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_attempts": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "nonce_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "mask_tail_cutoff": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    }
+  }
+}

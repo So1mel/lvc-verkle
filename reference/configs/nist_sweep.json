@@ -1,0 +1,35 @@
+{
+  "$schema": "schemas/sweep_config.schema.json",
+  "format": "lvc_verkle_sweep_config_v1",
+  "name": "nist_style_lvc_verkle_sweep",
+  "description": "NIST-style paper experiment presets. These are Sage reference parameters, not deployment profiles.",
+  "presets": [
+    {
+      "name": "nist_style_q8380417_tree4",
+      "lattice": {
+        "n": 2,
+        "q": 8380417,
+        "base": 2,
+        "m_bar": 5
+      },
+      "sample_pre": {
+        "beta": 1500000,
+        "sigma_pre": 90000,
+        "omega_factor": 0.01,
+        "tail_cutoff": 12
+      },
+      "tree": {
+        "branching_factor": 4,
+        "height": 3
+      },
+      "authentication": {
+        "challenge_modulus": 3,
+        "sigma_mask": 6000000,
+        "beta_response": 2000000,
+        "max_attempts": 1024,
+        "nonce_bytes": 32,
+        "mask_tail_cutoff": 12
+      }
+    }
+  ]
+}
