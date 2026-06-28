@@ -1,5 +1,7 @@
 # LVC-Verkle Sage Reference
 
+[中文](README.zh-CN.md) | English
+
 SageMath reference implementation for the LVC-Verkle UAV authentication scheme.
 
 Implemented algorithms:

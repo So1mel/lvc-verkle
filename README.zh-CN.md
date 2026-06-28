@@ -1,5 +1,7 @@
 # LVC-Verkle Sage 参考实现
 
+中文 | [English](README.md)
+
 这是 LVC-Verkle 无人机认证方案的 SageMath 参考实现。
 
 已实现算法：
