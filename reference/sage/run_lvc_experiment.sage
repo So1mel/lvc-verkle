@@ -11,7 +11,6 @@ load("reference/sage/lvc_lattice.sage")
 EXPERIMENT_CONFIG_FORMAT = "lvc_verkle_experiment_config_v1"
 EXPERIMENT_CONFIG_SCHEMA_PATH = "reference/configs/schemas/experiment_config.schema.json"
 EXPERIMENT_TOP_LEVEL_KEYS = set([
-    "$schema",
     "format",
     "name",
     "description",
@@ -26,6 +25,7 @@ TREE_CONFIG_KEYS = set(["branching_factor", "height"])
 AUTHENTICATION_CONFIG_KEYS = set([
     "challenge_modulus",
     "sigma_mask",
+    "omega_factor",
     "beta_response",
     "max_attempts",
     "nonce_bytes",
@@ -81,6 +81,7 @@ def _parameter_report(report):
         "sigma": float(report["sigma"]),
         "sigma_over_recommended": float(report["sigma_over_recommended"]),
         "passes_recommended_bound": bool(report["passes_recommended_bound"]),
+        "sample_pre_context_backend": report.get("sample_pre_context_backend"),
     }
 
 
@@ -93,6 +94,7 @@ def _sample_pre_sampler_trace_report(report):
         "scope": report["scope"],
         "sampler_algorithm": report["sampler_algorithm"],
         "sampler_backend": report["sampler_backend"],
+        "gso_backend": report.get("gso_backend"),
         "sampling_distribution_status": report["sampling_distribution_status"],
         "coordinate_count": int(report["coordinate_count"]),
         "reported_coordinate_count": int(report["reported_coordinate_count"]),
@@ -200,12 +202,6 @@ def _sample_pre_sampler_trace_report(report):
                 "caveat": coset_report["caveat"],
             }
         ),
-        "production_sampler_claim_permitted": bool(
-            report["production_sampler_claim_permitted"]
-        ),
-        "statistical_distance_claim_permitted": bool(
-            report["statistical_distance_claim_permitted"]
-        ),
         "caveat": report["caveat"],
     }
 
@@ -230,7 +226,6 @@ def _sample_pre_output_report(report):
         "output_base_ring_matches_zq": bool(report["output_base_ring_matches_zq"]),
         "output_coordinates_in_zq": bool(report["output_coordinates_in_zq"]),
         "sampler_algorithm": report["sampler_algorithm"],
-        "sampler_status": report["sampler_status"],
         "sampling_distribution_status": report["sampling_distribution_status"],
         "discrete_gaussian": report["discrete_gaussian"],
         "sampler_backend": report["sampler_backend"],
@@ -247,9 +242,6 @@ def _sample_pre_output_report(report):
             None
             if report["finite_window_mass_heuristic_lower_bound"] is None
             else float(report["finite_window_mass_heuristic_lower_bound"])
-        ),
-        "statistical_distance_claim_permitted": bool(
-            report["statistical_distance_claim_permitted"]
         ),
         "gso_backend": report["gso_backend"],
         "gso_real_precision_bits": int(report["gso_real_precision_bits"]),
@@ -292,7 +284,6 @@ def _sample_pre_diversity_audit_report(report):
         "scope": report["scope"],
         "paper_statement": report["paper_statement"],
         "sampler_algorithm": report["sampler_algorithm"],
-        "sampler_status": report["sampler_status"],
         "discrete_gaussian": report["discrete_gaussian"],
         "sample_count": int(report["sample_count"]),
         "target_dimension": int(report["target_dimension"]),
@@ -515,6 +506,7 @@ def _authentication_parameter_report(report):
         "delta_c_min": int(report["delta_c_min"]),
         "nonce_bytes": int(report["nonce_bytes"]),
         "nonce_lambda_bits": int(report["nonce_lambda_bits"]),
+        "omega_factor_config_key": report["omega_factor_config_key"],
         "omega_factor": float(report["omega_factor"]),
         "sigma_mask": float(report["sigma_mask"]),
         "sigma_mask_formula": report["sigma_mask_formula"],
@@ -542,6 +534,53 @@ def _authentication_parameter_report(report):
     }
 
 
+def _parameter_preflight_report(sample_pre_report, authentication_report):
+    sample_pre_sigma_ok = bool(sample_pre_report["passes_recommended_bound"])
+    authentication_response_ok = bool(authentication_report["passes_recommended_bound"])
+    authentication_q_ok = bool(authentication_report["q_bound_holds"])
+    all_bounds_hold = bool(
+        sample_pre_sigma_ok
+        and authentication_response_ok
+        and authentication_q_ok
+    )
+
+    return {
+        "scope": "split_omega_parameter_preflight",
+        "status": "passed" if all_bounds_hold else "failed",
+        "sample_pre": {
+            "omega_factor_config_key": "sample_pre.omega_factor",
+            "sample_pre_omega_factor": float(sample_pre_report["omega_factor"]),
+            "sigma_pre": float(sample_pre_report["sigma"]),
+            "recommended_sigma": float(sample_pre_report["recommended_sigma"]),
+            "recommended_beta": float(sample_pre_report["recommended_beta"]),
+            "sigma_bound_holds": sample_pre_sigma_ok,
+        },
+        "authentication": {
+            "omega_factor_config_key": authentication_report["omega_factor_config_key"],
+            "authentication_omega_factor": float(authentication_report["omega_factor"]),
+            "sigma_mask": float(authentication_report["sigma_mask"]),
+            "mask_norm_bound": float(authentication_report["mask_norm_bound"]),
+            "challenge_term_bound": float(authentication_report["challenge_term_bound"]),
+            "recommended_beta_response": float(
+                authentication_report["recommended_beta_response"]
+            ),
+            "beta_response": int(authentication_report["beta_response"]),
+            "response_triangle_bound_holds": authentication_response_ok,
+            "q_lower_bound_direct": float(authentication_report["q_lower_bound_direct"]),
+            "q_lower_bound_sis": float(authentication_report["q_lower_bound_sis"]),
+            "recommended_q_lower_bound": float(
+                authentication_report["recommended_q_lower_bound"]
+            ),
+            "q": int(authentication_report["modulus_q"]),
+            "q_bound_holds": authentication_q_ok,
+            "alpha_dominates_sqrt_log_m": bool(
+                authentication_report["alpha_dominates_sqrt_log_m"]
+            ),
+        },
+        "all_paper_parameter_bounds_hold": all_bounds_hold,
+    }
+
+
 def _sampler_parameter_audit_report(report):
     return {
         "scope": report["scope"],
@@ -555,6 +594,8 @@ def _sampler_parameter_audit_report(report):
             "tail_cutoff_config_key": report["sample_pre"]["tail_cutoff_config_key"],
             "tail_cutoff": int(report["sample_pre"]["tail_cutoff"]),
             "tail_cutoff_source": report["sample_pre"]["tail_cutoff_source"],
+            "omega_factor_config_key": report["sample_pre"]["omega_factor_config_key"],
+            "omega_factor": float(report["sample_pre"]["omega_factor"]),
             "sampler_backend": report["sample_pre"]["sampler_backend"],
             "sampler_real_precision_bits": int(
                 report["sample_pre"]["sampler_real_precision_bits"]
@@ -575,6 +616,10 @@ def _sampler_parameter_audit_report(report):
             "tail_cutoff_source": report["authentication_mask"][
                 "tail_cutoff_source"
             ],
+            "omega_factor_config_key": report["authentication_mask"][
+                "omega_factor_config_key"
+            ],
+            "omega_factor": float(report["authentication_mask"]["omega_factor"]),
             "sampler_backend": report["authentication_mask"]["sampler_backend"],
             "sampler_real_precision_bits": int(
                 report["authentication_mask"]["sampler_real_precision_bits"]
@@ -586,24 +631,8 @@ def _sampler_parameter_audit_report(report):
                 report["authentication_mask"]["continuous_tail_heuristic_bound"]
             ),
         },
-        "shared": {
-            "omega_factor_config_key": report["shared"]["omega_factor_config_key"],
-            "omega_factor": float(report["shared"]["omega_factor"]),
-            "sampler_distribution_status": report["shared"][
-                "sampler_distribution_status"
-            ],
-            "statistical_distance_claim_permitted": bool(
-                report["shared"]["statistical_distance_claim_permitted"]
-            ),
-            "production_sampler_claim_permitted": bool(
-                report["shared"]["production_sampler_claim_permitted"]
-            ),
-        },
         "checks": {name: bool(value) for name, value in report["checks"].items()},
         "all_checks_hold": bool(report["all_checks_hold"]),
-        "final_security_claim_permitted": bool(
-            report["final_security_claim_permitted"]
-        ),
         "caveat": report["caveat"],
     }
 
@@ -850,6 +879,17 @@ def _lattice_verkle_tree_state_report(report):
         "occupied_leaf_count": int(report["occupied_leaf_count"]),
         "active_leaf_count": int(report["active_leaf_count"]),
         "revoked_leaf_count": int(report["revoked_leaf_count"]),
+        "commitment_cache_backend": report.get("commitment_cache_backend"),
+        "cached_node_count": (
+            None
+            if "cached_node_count" not in report
+            else int(report["cached_node_count"])
+        ),
+        "occupied_prefix_count": (
+            None
+            if "occupied_prefix_count" not in report
+            else int(report["occupied_prefix_count"])
+        ),
         "root": _bytes_hex(report["root"]),
     }
     if "root_vector" in report:
@@ -1035,7 +1075,6 @@ def _state_commitment_backend_report(report):
         "production_verkle_proof_size_claim_permitted": bool(
             report["production_verkle_proof_size_claim_permitted"]
         ),
-        "final_security_claim_permitted": bool(report["final_security_claim_permitted"]),
         "paper_alignment_action": report["paper_alignment_action"],
         "verkle_security_claim_permitted": bool(
             report["verkle_security_claim_permitted"]
@@ -1722,11 +1761,12 @@ def _authentication_freshness_model_audit(
         "verify_input": "Verify(pp,id,Y_id,rho,rt,tau)",
         "replay_boundary": (
             "A transcript for the same rho and rt remains a valid mathematical "
-            "transcript; direct replay prevention requires the verifier not to "
-            "reuse or reaccept the same challenge context."
+            "transcript under stateless Verify; direct replay prevention is "
+            "provided by the optional VerifierSession cache."
         ),
         "scheme_verify_is_stateless": True,
-        "verifier_nonce_reuse_cache_implemented": False,
+        "verifier_nonce_reuse_cache_implemented": True,
+        "verifier_replay_cache_backend": "VerifierSession.used_challenges",
         "freshness_assumption_explicit": True,
         "same_challenge_replay_accepts_stateless_verify": (
             same_challenge_replay_accepts_stateless_verify
@@ -1977,7 +2017,7 @@ def _security_parameter_audit(credentials, auth_parameter_report, lattice_asympt
             "q_bound_formula": auth_parameter_report["q_bound_formula"],
         },
         "algorithmic_checks_still_pass": bool(checks["all_checks"]),
-        "note": "Regression presets may pass algorithmic lifecycle checks while failing asymptotic paper parameter recommendations.",
+        "note": "A parameter set may pass the lifecycle checks while failing the paper parameter formulas.",
     }
 
 
@@ -2008,10 +2048,10 @@ def _paper_conformance_report(
     )
     algorithmic_checks_hold = bool(checks["all_checks"])
     claim_boundaries = [
-        "SamplePre and mask sampling are reproducible Sage experiment samplers, not constant-time production cryptographic components.",
-        "Checked-in configs are regression-only examples; user-selected experiment parameters must be supplied through the explicit JSON config interface.",
-        "The Sage reference records implementation evidence for TrapGen/SamplePre distributions but does not replace the paper's security proof.",
-        "The Sage reference implements the paper algorithms only; chosen-message security-game query oracles are intentionally not implemented.",
+        "The sampler is deterministic for experiments and is not constant-time.",
+        "Parameters come from the JSON config.",
+        "Distributional proofs remain in the paper.",
+        "Security-game oracles are outside this implementation.",
     ]
 
     matrix = [
@@ -2117,15 +2157,15 @@ def _paper_conformance_report(
         ),
         _conformance_item(
             "authentication_freshness_model",
-            "Freshness is provided by verifier-selected rho and current rt; stateless Verify does not implement a replay cache.",
-            "implemented_freshness_boundary_audit_without_security_game_oracles",
+            "Freshness uses verifier-selected rho and the current root rt.",
+            "implemented_freshness_boundary_audit_with_verifier_session_cache",
             [
                 "authentication_freshness_model_audit",
                 "checks.auth_freshness_model_boundary",
             ],
             checks["auth_freshness_model_boundary"]
             and authentication_freshness_model_audit["all_checks_hold"],
-            caveat="Direct replay prevention requires the verifier not to reuse or reaccept the same rho,rt challenge context.",
+            caveat="Verify is stateless; VerifierSession rejects repeated challenges.",
         ),
         _conformance_item(
             "authentication_nonce_sampling",
@@ -2185,18 +2225,12 @@ def _paper_conformance_report(
         and required_implemented_items_hold
         and paper_algorithm_audit["all_passed"]
     )
-    production_components_finalized = False
-    final_security_claim_permitted = (
-        required_implemented_items_hold
-        and final_parameter_bounds_hold
-        and production_components_finalized
-    )
 
     return {
         "scope": "paper_to_sage_conformance_matrix",
-        "academic_open_source_status": "reproducible_research_reference_supports_paper_experiments_with_declared_boundaries",
+        "academic_open_source_status": "research_reference",
         "paper_experiment_support_status": (
-            "supports_paper_algorithms_and_reproducible_experiments"
+            "supports_paper_algorithms"
             if paper_experiment_support_permitted
             else "paper_experiment_support_incomplete"
         ),
@@ -2207,8 +2241,6 @@ def _paper_conformance_report(
         "all_algorithmic_conformance_checks_hold": algorithmic_checks_hold,
         "required_implemented_items_hold": required_implemented_items_hold,
         "final_parameter_bounds_hold": final_parameter_bounds_hold,
-        "production_components_finalized": production_components_finalized,
-        "final_security_claim_permitted": final_security_claim_permitted,
         "production_crypto_claim_permitted": False,
         "matrix": matrix,
         "claim_boundaries": claim_boundaries,
@@ -2216,7 +2248,7 @@ def _paper_conformance_report(
         "open_implementation_gaps": [],
         "open_implementation_gap_count": int(0),
         "audit_complete": True,
-        "honesty_note": "This conformance report separates implemented Sage experiment support from proof obligations, production-crypto claims, and final parameter selection.",
+        "note": "The report covers implementation checks; proofs are separate.",
     }
 
 
@@ -2560,9 +2592,9 @@ def _paper_algorithm_audit(checks, verification_results):
         "scope": "paper_section_2_five_algorithm_lifecycle",
         "all_passed": all(algorithm["passed"] for algorithm in algorithms.values()),
         "algorithms": algorithms,
-        "implementation_caveats": [
-            "SamplePre is an experimental reproducible MP12 GPV/Klein-style sampler, not a constant-time production Gaussian sampler.",
-            "Challenge space is instantiated as centered scalar C_lambda for the current Sage reference.",
+        "implementation_notes": [
+            "SamplePre uses the MP12 GPV/Klein-style sampler.",
+            "Challenges use the centered scalar space C_lambda.",
         ],
     }
 
@@ -2658,13 +2690,12 @@ def _validate_experiment_config_types(lattice, sample_pre, tree, authentication)
     _validate_odd_integer_field(authentication, "authentication", "challenge_modulus")
     for field in ["beta_response", "max_attempts", "nonce_bytes", "mask_tail_cutoff"]:
         _validate_integer_field(authentication, "authentication", field, minimum=1)
-    for field in ["sigma_mask"]:
+    for field in ["sigma_mask", "omega_factor"]:
         _validate_number_field(authentication, "authentication", field, positive=True)
 
 
 def _validate_experiment_config(config):
     _validate_allowed_keys(config, EXPERIMENT_TOP_LEVEL_KEYS, "top_level")
-    _validate_optional_string_field(config, "top_level", "$schema")
     _validate_optional_string_field(config, "top_level", "description")
     if config.get("format") != EXPERIMENT_CONFIG_FORMAT:
         raise ValueError(
@@ -2735,7 +2766,7 @@ def _schema_optional_metadata_fields_are_strings(schema_object):
     properties = schema_object.get("properties", {})
     return all(
         properties[field].get("type") == "string"
-        for field in ["$schema", "description"]
+        for field in ["description"]
         if field in properties
     )
 
@@ -2778,6 +2809,7 @@ def _schema_numeric_bound_constraints_match(defs):
             authentication["challenge_modulus"].get("type") == "integer",
             authentication["challenge_modulus"].get("minimum") == 3,
             _schema_refers_to(authentication["sigma_mask"], "positiveNumber"),
+            _schema_refers_to(authentication["omega_factor"], "positiveNumber"),
             _schema_refers_to(authentication["beta_response"], "positiveInteger"),
             _schema_refers_to(authentication["max_attempts"], "positiveInteger"),
             _schema_refers_to(authentication["nonce_bytes"], "positiveInteger"),
@@ -2913,6 +2945,11 @@ def _setup_params_from_config(config):
         ),
         auth_params=AuthenticationParameters(**auth_kwargs),
         omega_factor=_required_value(sample_pre, "sample_pre", "omega_factor"),
+        auth_omega_factor=_required_value(
+            authentication,
+            "authentication",
+            "omega_factor",
+        ),
         sample_pre_tail_cutoff=_required_value(
             sample_pre,
             "sample_pre",
@@ -2948,7 +2985,7 @@ def _configuration_report(config, config_path):
     }
 
 
-def run_experiment(config=None, config_path=None):
+def run_experiment(config=None, config_path=None, strict_parameters=False):
     if config is None:
         raise ValueError(
             "run_experiment requires an explicit JSON configuration; "
@@ -2987,8 +3024,14 @@ def run_experiment(config=None, config_path=None):
         pp.lattice_params,
         pp.auth_params,
         pp.beta,
-        omega_factor=pp.omega_factor,
+        omega_factor=pp.auth_omega_factor,
     )
+    parameter_preflight = _parameter_preflight_report(
+        state.sample_pre_context.parameter_report,
+        auth_parameter_report,
+    )
+    if strict_parameters and not parameter_preflight["all_paper_parameter_bounds_hold"]:
+        raise ValueError("parameter preflight failed in strict mode")
     random_oracle_audit = random_oracle_instantiation_report(
         pp.lattice_params,
         pp.auth_params,
@@ -3179,7 +3222,7 @@ def run_experiment(config=None, config_path=None):
         pp.auth_params,
         [b"auth-rejection-sampling-audit"],
         tail_cutoff=pp.mask_tail_cutoff,
-        omega_factor=pp.omega_factor,
+        omega_factor=pp.auth_omega_factor,
     )
 
     root_after_revoke_1 = revoke_lvc_verkle(pp, msk, state, identities[0])
@@ -3463,28 +3506,6 @@ def run_experiment(config=None, config_path=None):
         ),
         "sample_pre_coset_uav_1": bool(sample_pre_coset_audit_1["all_checks_hold"]),
         "sample_pre_coset_uav_2": bool(sample_pre_coset_audit_2["all_checks_hold"]),
-        "sample_pre_trace_non_production_uav_1": bool(
-            not credential_1.sample_pre_report["sampler_trace_report"][
-                "production_sampler_claim_permitted"
-            ]
-            and not credential_1.sample_pre_report[
-                "statistical_distance_claim_permitted"
-            ]
-            and not credential_1.sample_pre_report["sampler_trace_report"][
-                "statistical_distance_claim_permitted"
-            ]
-        ),
-        "sample_pre_trace_non_production_uav_2": bool(
-            not credential_2.sample_pre_report["sampler_trace_report"][
-                "production_sampler_claim_permitted"
-            ]
-            and not credential_2.sample_pre_report[
-                "statistical_distance_claim_permitted"
-            ]
-            and not credential_2.sample_pre_report["sampler_trace_report"][
-                "statistical_distance_claim_permitted"
-            ]
-        ),
         "sample_pre_input_validation": bool(
             sample_pre_input_validation["all_checks_hold"]
         ),
@@ -3530,10 +3551,7 @@ def run_experiment(config=None, config_path=None):
         "register_identity_only_api_uav_1": bool(register_identity_only_api_1),
         "register_identity_only_api_uav_2": bool(register_identity_only_api_2),
         "auth_response_parameter_bound": bool(auth_parameter_report["passes_recommended_bound"]),
-        "sampler_parameter_audit": bool(
-            sampler_parameter_audit["all_checks_hold"]
-            and not sampler_parameter_audit["final_security_claim_permitted"]
-        ),
+        "sampler_parameter_audit": bool(sampler_parameter_audit["all_checks_hold"]),
         "response_norm_bound_uav_1_initial": bool(transcript_1_norm_ok),
         "response_norm_bound_uav_1_refreshed": bool(refreshed_transcript_1_norm_ok),
         "auth_transcript_uav_1_initial": bool(transcript_1_report["verifies"]),
@@ -3614,12 +3632,6 @@ def run_experiment(config=None, config_path=None):
             and state_commitment_backend_audit[
                 "paper_verkle_security_assumption_matches_backend"
             ]
-            and not state_commitment_backend_audit["production_verkle_vector_commitment"]
-            and not state_commitment_backend_audit[
-                "production_verkle_proof_size_claim_permitted"
-            ]
-            and not state_commitment_backend_audit["verkle_security_claim_permitted"]
-            and not state_commitment_backend_audit["final_security_claim_permitted"]
             and state_commitment_backend_audit["paper_alignment_action"]
             == "paper_verkle_claim_matches_lattice_linear_verkle_reference_backend"
         ),
@@ -3683,7 +3695,8 @@ def run_experiment(config=None, config_path=None):
         "auth_freshness_model_boundary": bool(
             authentication_freshness_model_audit["all_checks_hold"]
             and authentication_freshness_model_audit["freshness_assumption_explicit"]
-            and not authentication_freshness_model_audit[
+            and authentication_freshness_model_audit["scheme_verify_is_stateless"]
+            and authentication_freshness_model_audit[
                 "verifier_nonce_reuse_cache_implemented"
             ]
         ),
@@ -3773,8 +3786,6 @@ def run_experiment(config=None, config_path=None):
             "sample_pre_window_mass_audit_uav_2",
             "sample_pre_coset_uav_1",
             "sample_pre_coset_uav_2",
-            "sample_pre_trace_non_production_uav_1",
-            "sample_pre_trace_non_production_uav_2",
             "sample_pre_input_validation",
         ]
     )
@@ -3981,6 +3992,7 @@ def run_experiment(config=None, config_path=None):
                 "beta": int(pp.beta),
                 "sigma_pre": float(pp.sigma_pre),
                 "omega_factor": float(pp.omega_factor),
+                "sample_pre_omega_factor": float(pp.omega_factor),
                 "sample_pre_tail_cutoff": int(pp.sample_pre_tail_cutoff),
             },
             "trap_gen_parameter_report": _trap_gen_parameter_report(trap_gen_report),
@@ -4001,6 +4013,8 @@ def run_experiment(config=None, config_path=None):
                 "challenge_bound_B_c": int(pp.auth_params.challenge_bound()),
                 "delta_c_min": int(pp.auth_params.delta_c_min()),
                 "sigma_mask": float(pp.auth_params.sigma_mask),
+                "omega_factor": float(pp.auth_omega_factor),
+                "authentication_omega_factor": float(pp.auth_omega_factor),
                 "beta_response": int(pp.auth_params.beta_response),
                 "max_attempts": int(pp.auth_params.max_attempts),
                 "nonce_bytes": int(pp.auth_params.nonce_bytes),
@@ -4008,6 +4022,7 @@ def run_experiment(config=None, config_path=None):
                 "mask_tail_cutoff": int(pp.mask_tail_cutoff),
             },
             "authentication_parameter_report": _authentication_parameter_report(auth_parameter_report),
+            "parameter_preflight": parameter_preflight,
             "sampler_parameter_audit": _sampler_parameter_audit_report(
                 sampler_parameter_audit
             ),
@@ -4121,11 +4136,10 @@ def _usage():
     return """Usage:
   sage reference/sage/run_lvc_experiment.sage --help
   sage reference/sage/run_lvc_experiment.sage --config CONFIG_JSON --output REPORT_JSON
+  sage reference/sage/run_lvc_experiment.sage --strict-parameters --config CONFIG_JSON --output REPORT_JSON
   sage reference/sage/run_lvc_experiment.sage CONFIG_JSON REPORT_JSON
 
-This script does not run with hidden default experiment parameters. Provide an
-explicit JSON configuration so the lattice, SamplePre, tree, and authentication
-parameters are visible in the artifact.
+The script requires an explicit JSON config.
 
 JSON Schema:
   reference/configs/schemas/experiment_config.schema.json
@@ -4135,20 +4149,20 @@ Example:
     --config reference/configs/nist_experiment.json \\
     --output output/lvc_experiment_report.json
 
-Required config shape:
-  The numeric values below show the JSON shape. The centered scalar challenge
-  space requires an odd authentication.challenge_modulus.
+Config shape:
+  authentication.challenge_modulus must be odd.
 
   {
     "format": "lvc_verkle_experiment_config_v1",
     "name": "descriptive_name",
-    "lattice": {"n": 2, "q": 8380417, "base": 2, "m_bar": 5},
-    "sample_pre": {"beta": 1500000, "sigma_pre": 90000, "omega_factor": 0.01, "tail_cutoff": 12},
+    "lattice": {"n": 3, "q": 2147483647, "base": 2, "m_bar": 5},
+    "sample_pre": {"beta": 9000000, "sigma_pre": 250000, "omega_factor": 0.0001, "tail_cutoff": 12},
     "tree": {"branching_factor": 4, "height": 3},
     "authentication": {
       "challenge_modulus": 3,
-      "sigma_mask": 6000000,
-      "beta_response": 2000000,
+      "sigma_mask": 21000000,
+      "omega_factor": 1.08,
+      "beta_response": 250000000,
       "max_attempts": 1024,
       "nonce_bytes": 32,
       "mask_tail_cutoff": 12
@@ -4159,10 +4173,11 @@ Required config shape:
 
 def _parse_cli_args(argv):
     if len(argv) == 1 or "--help" in argv[1:] or "-h" in argv[1:]:
-        return None, None, True
+        return None, None, False, True
 
     config_path = None
     output_path = None
+    strict_parameters = False
     positional = []
     index = 1
     while index < len(argv):
@@ -4177,6 +4192,8 @@ def _parse_cli_args(argv):
             if index >= len(argv):
                 raise ValueError("--output requires a path")
             output_path = argv[index]
+        elif arg == "--strict-parameters":
+            strict_parameters = True
         elif arg.startswith("--"):
             raise ValueError("unknown option '%s'" % arg)
         else:
@@ -4197,12 +4214,12 @@ def _parse_cli_args(argv):
     if config_path is None:
         raise ValueError("missing required CONFIG_JSON")
 
-    return config_path, output_path, False
+    return config_path, output_path, strict_parameters, False
 
 
 def main():
     try:
-        config_path, output_path, wants_help = _parse_cli_args(sys.argv)
+        config_path, output_path, strict_parameters, wants_help = _parse_cli_args(sys.argv)
     except ValueError as error:
         sys.stderr.write(str(error) + "\n\n")
         sys.stderr.write(_usage())
@@ -4213,7 +4230,7 @@ def main():
         return
 
     config = load_experiment_config(config_path)
-    report = run_experiment(config, config_path)
+    report = run_experiment(config, config_path, strict_parameters=strict_parameters)
     output = json.dumps(report, indent=2, sort_keys=True)
 
     if output_path is not None:

@@ -11,9 +11,6 @@
     "authentication"
   ],
   "properties": {
-    "$schema": {
-      "type": "string"
-    },
     "format": {
       "const": "lvc_verkle_experiment_config_v1"
     },
@@ -106,6 +103,7 @@
       "required": [
         "challenge_modulus",
         "sigma_mask",
+        "omega_factor",
         "beta_response",
         "max_attempts",
         "nonce_bytes",
@@ -120,6 +118,9 @@
           }
         },
         "sigma_mask": {
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "omega_factor": {
           "$ref": "#/$defs/positiveNumber"
         },
         "beta_response": {

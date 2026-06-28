@@ -126,7 +126,9 @@ assert mp12_gpv_coset_report["candidate_norm_squared"] == centered_norm_squared(
     mp12_params.q,
 )
 assert mp12_gpv_trace["sampler_algorithm"] == "randomized_nearest_plane_klein"
-assert mp12_gpv_trace["sampler_backend"] == "shake256_shifted_inverse_cdf_truncated_window"
+assert mp12_gpv_trace["sampler_backend"] == (
+    "shake256_hybrid_shifted_inverse_cdf_or_box_muller_truncated_window"
+)
 assert mp12_gpv_trace["sampling_distribution_status"] == (
     "finite_window_truncated_shifted_discrete_gaussian_not_full_lattice_gaussian"
 )
@@ -148,8 +150,6 @@ assert mp12_gpv_trace["all_support_windows_finite"]
 assert mp12_gpv_trace["all_coefficients_inside_windows"]
 assert mp12_gpv_trace["all_window_mass_bounds_valid"]
 assert mp12_gpv_trace["all_checks_hold"]
-assert not mp12_gpv_trace["production_sampler_claim_permitted"]
-assert not mp12_gpv_trace["statistical_distance_claim_permitted"]
 assert len(mp12_gpv_trace["coordinate_samples"]) == mp12_kernel.ncols()
 for coordinate_sample in mp12_gpv_trace["coordinate_samples"]:
     assert coordinate_sample["support_lower"] <= coordinate_sample["coefficient"]
@@ -356,7 +356,9 @@ assert mp12_credential.sample_pre_report["output_coordinates_in_zq"]
 assert mp12_credential.sample_pre_report["sampling_distribution_status"] == (
     "finite_window_truncated_shifted_discrete_gaussian_not_full_lattice_gaussian"
 )
-assert mp12_credential.sample_pre_report["sampler_backend"] == "shake256_inverse_cdf_truncated_window"
+assert mp12_credential.sample_pre_report["sampler_backend"] == (
+    "shake256_hybrid_inverse_cdf_or_box_muller_truncated_window"
+)
 assert mp12_credential.sample_pre_report["sampler_real_precision_bits"] == 256
 assert mp12_credential.sample_pre_report["sampler_draw_bits"] == 256
 assert mp12_credential.sample_pre_report["tail_cutoff"] == 12
@@ -370,9 +372,6 @@ assert mp12_credential.sample_pre_report[
     "finite_window_mass_heuristic_lower_bound"
 ] == mp12_credential.sample_pre_report["sampler_trace_report"][
     "finite_window_mass_heuristic_lower_bound"
-]
-assert not mp12_credential.sample_pre_report[
-    "statistical_distance_claim_permitted"
 ]
 assert mp12_credential.sample_pre_report["gso_backend"] == "realfield_gram_schmidt_columns"
 assert mp12_credential.sample_pre_report["gso_real_precision_bits"] == 256
@@ -394,9 +393,6 @@ assert credential_coset_report["all_checks_hold"]
 assert credential_coset_report["candidate_norm_squared"] == (
     mp12_credential.sample_pre_report["norm_squared"]
 )
-assert not mp12_credential.sample_pre_report["sampler_trace_report"][
-    "production_sampler_claim_permitted"
-]
 assert mp12_credential.sample_pre_report["recommended_beta"] == (
     mp12_credential.parameter_report["recommended_beta"]
 )

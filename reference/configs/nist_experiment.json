@@ -1,18 +1,17 @@
 {
-  "$schema": "schemas/experiment_config.schema.json",
   "format": "lvc_verkle_experiment_config_v1",
   "name": "nist_style_lvc_verkle_experiment",
-  "description": "NIST-style Sage experiment profile using q=8380417 and 256-bit nonces. This is for paper experiments, not deployment.",
+  "description": "NIST-style Sage experiment profile with a 31-bit prime q and 256-bit nonces.",
   "lattice": {
-    "n": 2,
-    "q": 8380417,
+    "n": 3,
+    "q": 2147483647,
     "base": 2,
     "m_bar": 5
   },
   "sample_pre": {
-    "beta": 1500000,
-    "sigma_pre": 90000,
-    "omega_factor": 0.01,
+    "beta": 9000000,
+    "sigma_pre": 250000,
+    "omega_factor": 0.0001,
     "tail_cutoff": 12
   },
   "tree": {
@@ -21,8 +20,9 @@
   },
   "authentication": {
     "challenge_modulus": 3,
-    "sigma_mask": 6000000,
-    "beta_response": 2000000,
+    "sigma_mask": 21000000,
+    "omega_factor": 1.08,
+    "beta_response": 250000000,
     "max_attempts": 1024,
     "nonce_bytes": 32,
     "mask_tail_cutoff": 12

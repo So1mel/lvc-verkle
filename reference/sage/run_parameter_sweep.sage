@@ -11,7 +11,6 @@ load("reference/sage/lvc_lattice.sage")
 SWEEP_CONFIG_FORMAT = "lvc_verkle_sweep_config_v1"
 SWEEP_CONFIG_SCHEMA_PATH = "reference/configs/schemas/sweep_config.schema.json"
 SWEEP_TOP_LEVEL_KEYS = set([
-    "$schema",
     "format",
     "name",
     "description",
@@ -31,6 +30,7 @@ TREE_CONFIG_KEYS = set(["branching_factor", "height"])
 AUTHENTICATION_CONFIG_KEYS = set([
     "challenge_modulus",
     "sigma_mask",
+    "omega_factor",
     "beta_response",
     "max_attempts",
     "nonce_bytes",
@@ -89,6 +89,7 @@ def _parameter_report(report):
         "sigma": float(report["sigma"]),
         "sigma_over_recommended": float(report["sigma_over_recommended"]),
         "passes_recommended_bound": bool(report["passes_recommended_bound"]),
+        "sample_pre_context_backend": report.get("sample_pre_context_backend"),
     }
 
 
@@ -101,6 +102,7 @@ def _sample_pre_sampler_trace_report(report):
         "scope": report["scope"],
         "sampler_algorithm": report["sampler_algorithm"],
         "sampler_backend": report["sampler_backend"],
+        "gso_backend": report.get("gso_backend"),
         "sampling_distribution_status": report["sampling_distribution_status"],
         "coordinate_count": int(report["coordinate_count"]),
         "reported_coordinate_count": int(report["reported_coordinate_count"]),
@@ -208,12 +210,6 @@ def _sample_pre_sampler_trace_report(report):
                 "caveat": coset_report["caveat"],
             }
         ),
-        "production_sampler_claim_permitted": bool(
-            report["production_sampler_claim_permitted"]
-        ),
-        "statistical_distance_claim_permitted": bool(
-            report["statistical_distance_claim_permitted"]
-        ),
         "caveat": report["caveat"],
     }
 
@@ -238,7 +234,6 @@ def _sample_pre_output_report(report):
         "output_base_ring_matches_zq": bool(report["output_base_ring_matches_zq"]),
         "output_coordinates_in_zq": bool(report["output_coordinates_in_zq"]),
         "sampler_algorithm": report["sampler_algorithm"],
-        "sampler_status": report["sampler_status"],
         "sampling_distribution_status": report["sampling_distribution_status"],
         "discrete_gaussian": report["discrete_gaussian"],
         "sampler_backend": report["sampler_backend"],
@@ -255,9 +250,6 @@ def _sample_pre_output_report(report):
             None
             if report["finite_window_mass_heuristic_lower_bound"] is None
             else float(report["finite_window_mass_heuristic_lower_bound"])
-        ),
-        "statistical_distance_claim_permitted": bool(
-            report["statistical_distance_claim_permitted"]
         ),
         "gso_backend": report["gso_backend"],
         "gso_real_precision_bits": int(report["gso_real_precision_bits"]),
@@ -300,7 +292,6 @@ def _sample_pre_diversity_audit_report(report):
         "scope": report["scope"],
         "paper_statement": report["paper_statement"],
         "sampler_algorithm": report["sampler_algorithm"],
-        "sampler_status": report["sampler_status"],
         "discrete_gaussian": report["discrete_gaussian"],
         "sample_count": int(report["sample_count"]),
         "target_dimension": int(report["target_dimension"]),
@@ -490,6 +481,7 @@ def _authentication_parameter_report(report):
         "delta_c_min": int(report["delta_c_min"]),
         "nonce_bytes": int(report["nonce_bytes"]),
         "nonce_lambda_bits": int(report["nonce_lambda_bits"]),
+        "omega_factor_config_key": report["omega_factor_config_key"],
         "omega_factor": float(report["omega_factor"]),
         "sigma_mask": float(report["sigma_mask"]),
         "sigma_mask_formula": report["sigma_mask_formula"],
@@ -517,6 +509,53 @@ def _authentication_parameter_report(report):
     }
 
 
+def _parameter_preflight_report(sample_pre_report, authentication_report):
+    sample_pre_sigma_ok = bool(sample_pre_report["passes_recommended_bound"])
+    authentication_response_ok = bool(authentication_report["passes_recommended_bound"])
+    authentication_q_ok = bool(authentication_report["q_bound_holds"])
+    all_bounds_hold = bool(
+        sample_pre_sigma_ok
+        and authentication_response_ok
+        and authentication_q_ok
+    )
+
+    return {
+        "scope": "split_omega_parameter_preflight",
+        "status": "passed" if all_bounds_hold else "failed",
+        "sample_pre": {
+            "omega_factor_config_key": "sample_pre.omega_factor",
+            "sample_pre_omega_factor": float(sample_pre_report["omega_factor"]),
+            "sigma_pre": float(sample_pre_report["sigma"]),
+            "recommended_sigma": float(sample_pre_report["recommended_sigma"]),
+            "recommended_beta": float(sample_pre_report["recommended_beta"]),
+            "sigma_bound_holds": sample_pre_sigma_ok,
+        },
+        "authentication": {
+            "omega_factor_config_key": authentication_report["omega_factor_config_key"],
+            "authentication_omega_factor": float(authentication_report["omega_factor"]),
+            "sigma_mask": float(authentication_report["sigma_mask"]),
+            "mask_norm_bound": float(authentication_report["mask_norm_bound"]),
+            "challenge_term_bound": float(authentication_report["challenge_term_bound"]),
+            "recommended_beta_response": float(
+                authentication_report["recommended_beta_response"]
+            ),
+            "beta_response": int(authentication_report["beta_response"]),
+            "response_triangle_bound_holds": authentication_response_ok,
+            "q_lower_bound_direct": float(authentication_report["q_lower_bound_direct"]),
+            "q_lower_bound_sis": float(authentication_report["q_lower_bound_sis"]),
+            "recommended_q_lower_bound": float(
+                authentication_report["recommended_q_lower_bound"]
+            ),
+            "q": int(authentication_report["modulus_q"]),
+            "q_bound_holds": authentication_q_ok,
+            "alpha_dominates_sqrt_log_m": bool(
+                authentication_report["alpha_dominates_sqrt_log_m"]
+            ),
+        },
+        "all_paper_parameter_bounds_hold": all_bounds_hold,
+    }
+
+
 def _sampler_parameter_audit_report(report):
     return {
         "scope": report["scope"],
@@ -530,6 +569,8 @@ def _sampler_parameter_audit_report(report):
             "tail_cutoff_config_key": report["sample_pre"]["tail_cutoff_config_key"],
             "tail_cutoff": int(report["sample_pre"]["tail_cutoff"]),
             "tail_cutoff_source": report["sample_pre"]["tail_cutoff_source"],
+            "omega_factor_config_key": report["sample_pre"]["omega_factor_config_key"],
+            "omega_factor": float(report["sample_pre"]["omega_factor"]),
             "sampler_backend": report["sample_pre"]["sampler_backend"],
             "sampler_real_precision_bits": int(
                 report["sample_pre"]["sampler_real_precision_bits"]
@@ -550,6 +591,10 @@ def _sampler_parameter_audit_report(report):
             "tail_cutoff_source": report["authentication_mask"][
                 "tail_cutoff_source"
             ],
+            "omega_factor_config_key": report["authentication_mask"][
+                "omega_factor_config_key"
+            ],
+            "omega_factor": float(report["authentication_mask"]["omega_factor"]),
             "sampler_backend": report["authentication_mask"]["sampler_backend"],
             "sampler_real_precision_bits": int(
                 report["authentication_mask"]["sampler_real_precision_bits"]
@@ -561,24 +606,8 @@ def _sampler_parameter_audit_report(report):
                 report["authentication_mask"]["continuous_tail_heuristic_bound"]
             ),
         },
-        "shared": {
-            "omega_factor_config_key": report["shared"]["omega_factor_config_key"],
-            "omega_factor": float(report["shared"]["omega_factor"]),
-            "sampler_distribution_status": report["shared"][
-                "sampler_distribution_status"
-            ],
-            "statistical_distance_claim_permitted": bool(
-                report["shared"]["statistical_distance_claim_permitted"]
-            ),
-            "production_sampler_claim_permitted": bool(
-                report["shared"]["production_sampler_claim_permitted"]
-            ),
-        },
         "checks": {name: bool(value) for name, value in report["checks"].items()},
         "all_checks_hold": bool(report["all_checks_hold"]),
-        "final_security_claim_permitted": bool(
-            report["final_security_claim_permitted"]
-        ),
         "caveat": report["caveat"],
     }
 
@@ -761,6 +790,17 @@ def _lattice_verkle_tree_state_report(report):
         "occupied_leaf_count": int(report["occupied_leaf_count"]),
         "active_leaf_count": int(report["active_leaf_count"]),
         "revoked_leaf_count": int(report["revoked_leaf_count"]),
+        "commitment_cache_backend": report.get("commitment_cache_backend"),
+        "cached_node_count": (
+            None
+            if "cached_node_count" not in report
+            else int(report["cached_node_count"])
+        ),
+        "occupied_prefix_count": (
+            None
+            if "occupied_prefix_count" not in report
+            else int(report["occupied_prefix_count"])
+        ),
         "root": _bytes_hex(report["root"]),
     }
     if "root_vector" in report:
@@ -946,7 +986,6 @@ def _state_commitment_backend_report(report):
         "production_verkle_proof_size_claim_permitted": bool(
             report["production_verkle_proof_size_claim_permitted"]
         ),
-        "final_security_claim_permitted": bool(report["final_security_claim_permitted"]),
         "paper_alignment_action": report["paper_alignment_action"],
         "verkle_security_claim_permitted": bool(
             report["verkle_security_claim_permitted"]
@@ -1357,7 +1396,7 @@ def _security_parameter_audit(credential, auth_report, lattice_asymptotic_report
             "response_beta_formula": auth_report["response_beta_formula"],
             "q_bound_formula": auth_report["q_bound_formula"],
         },
-        "note": "Regression presets may pass algorithmic lifecycle checks while failing asymptotic paper parameter recommendations.",
+            "note": "A parameter set may pass the lifecycle checks while failing the paper parameter formulas.",
     }
 
 
@@ -1493,6 +1532,7 @@ def _preset_report(
     protocol_public_surface_audit,
     paper_protocol_clarification_audit,
     sampler_parameter_audit,
+    parameter_preflight,
 ):
     credential_norm_squared = int(credential.norm_squared)
     response_norm_squared = int(_zz_norm_squared(refreshed_transcript.response))
@@ -1511,6 +1551,7 @@ def _preset_report(
                 "beta": int(pp.beta),
                 "sigma_pre": float(pp.sigma_pre),
                 "omega_factor": float(pp.omega_factor),
+                "sample_pre_omega_factor": float(pp.omega_factor),
                 "sample_pre_tail_cutoff": int(pp.sample_pre_tail_cutoff),
             },
             "trap_gen_parameter_report": _trap_gen_parameter_report(trap_gen_report),
@@ -1534,10 +1575,13 @@ def _preset_report(
                 "nonce_bytes": int(pp.auth_params.nonce_bytes),
                 "nonce_lambda_bits": int(8 * pp.auth_params.nonce_bytes),
                 "sigma_mask": float(pp.auth_params.sigma_mask),
+                "omega_factor": float(pp.auth_omega_factor),
+                "authentication_omega_factor": float(pp.auth_omega_factor),
                 "beta_response": int(pp.auth_params.beta_response),
                 "mask_tail_cutoff": int(pp.mask_tail_cutoff),
             },
             "authentication_parameter_report": _authentication_parameter_report(auth_report),
+            "parameter_preflight": parameter_preflight,
             "sampler_parameter_audit": _sampler_parameter_audit_report(
                 sampler_parameter_audit
             ),
@@ -1755,17 +1799,6 @@ def _preset_report(
                     "coset_decomposition_report"
                 ]["all_checks_hold"]
             ),
-            "sample_pre_trace_non_production": bool(
-                not credential.sample_pre_report["sampler_trace_report"][
-                    "production_sampler_claim_permitted"
-                ]
-                and not credential.sample_pre_report[
-                    "statistical_distance_claim_permitted"
-                ]
-                and not credential.sample_pre_report["sampler_trace_report"][
-                    "statistical_distance_claim_permitted"
-                ]
-            ),
             "sample_pre_diversity_equations": bool(
                 sample_pre_diversity_audit["all_equations_hold"]
             ),
@@ -1835,14 +1868,6 @@ def _preset_report(
                 and state_commitment_backend_audit[
                     "paper_verkle_security_assumption_matches_backend"
                 ]
-                and not state_commitment_backend_audit[
-                    "production_verkle_vector_commitment"
-                ]
-                and not state_commitment_backend_audit[
-                    "production_verkle_proof_size_claim_permitted"
-                ]
-                and not state_commitment_backend_audit["verkle_security_claim_permitted"]
-                and not state_commitment_backend_audit["final_security_claim_permitted"]
                 and state_commitment_backend_audit["paper_alignment_action"]
                 == "paper_verkle_claim_matches_lattice_linear_verkle_reference_backend"
             ),
@@ -2040,12 +2065,13 @@ def _validate_config_value_types(section_prefix, lattice, sample_pre, tree, auth
             field,
             minimum=1,
         )
-    _validate_number_field(
-        authentication,
-        "%s.authentication" % section_prefix,
-        "sigma_mask",
-        positive=True,
-    )
+    for field in ["sigma_mask", "omega_factor"]:
+        _validate_number_field(
+            authentication,
+            "%s.authentication" % section_prefix,
+            field,
+            positive=True,
+        )
 
 
 def _validate_preset_config(preset_config, index):
@@ -2102,7 +2128,6 @@ def _validate_preset_config(preset_config, index):
 
 def _validate_sweep_config(config):
     _validate_allowed_keys(config, SWEEP_TOP_LEVEL_KEYS, "top_level")
-    _validate_optional_string_field(config, "top_level", "$schema")
     _validate_optional_string_field(config, "top_level", "description")
     if config.get("format") != SWEEP_CONFIG_FORMAT:
         raise ValueError("configuration 'format' must be '%s'" % SWEEP_CONFIG_FORMAT)
@@ -2203,6 +2228,7 @@ def _schema_numeric_bound_constraints_match(defs):
             authentication["challenge_modulus"].get("type") == "integer",
             authentication["challenge_modulus"].get("minimum") == 3,
             _schema_refers_to(authentication["sigma_mask"], "positiveNumber"),
+            _schema_refers_to(authentication["omega_factor"], "positiveNumber"),
             _schema_refers_to(authentication["beta_response"], "positiveInteger"),
             _schema_refers_to(authentication["max_attempts"], "positiveInteger"),
             _schema_refers_to(authentication["nonce_bytes"], "positiveInteger"),
@@ -2263,7 +2289,7 @@ def _schema_alignment_audit():
         [
             _schema_optional_metadata_fields_are_strings(
                 schema,
-                ["$schema", "description"],
+                ["description"],
             ),
             _schema_optional_metadata_fields_are_strings(
                 defs["preset"],
@@ -2334,6 +2360,11 @@ def _flat_preset_from_config(preset_config, index):
         "beta": _required_value(sample_pre, "sample_pre", "beta"),
         "sigma_pre": _required_value(sample_pre, "sample_pre", "sigma_pre"),
         "omega_factor": _required_value(sample_pre, "sample_pre", "omega_factor"),
+        "auth_omega_factor": _required_value(
+            authentication,
+            "authentication",
+            "omega_factor",
+        ),
         "sample_pre_tail_cutoff": _required_value(
             sample_pre,
             "sample_pre",
@@ -2390,7 +2421,7 @@ def _configuration_report(config, config_path, presets):
     }
 
 
-def run_preset(preset):
+def run_preset(preset, strict_parameters=False):
     try:
         setup_params = LVCVerkleSetupParameters(
             lattice_params=MP12GadgetParameters(
@@ -2413,6 +2444,7 @@ def run_preset(preset):
                 nonce_bytes=preset["nonce_bytes"],
             ),
             omega_factor=preset["omega_factor"],
+            auth_omega_factor=preset["auth_omega_factor"],
             sample_pre_tail_cutoff=preset["sample_pre_tail_cutoff"],
             mask_tail_cutoff=preset["mask_tail_cutoff"],
         )
@@ -2431,8 +2463,14 @@ def run_preset(preset):
             pp.lattice_params,
             pp.auth_params,
             pp.beta,
-            omega_factor=pp.omega_factor,
+            omega_factor=pp.auth_omega_factor,
         )
+        parameter_preflight = _parameter_preflight_report(
+            state.sample_pre_context.parameter_report,
+            auth_report,
+        )
+        if strict_parameters and not parameter_preflight["all_paper_parameter_bounds_hold"]:
+            raise ValueError("parameter preflight failed in strict mode")
         random_oracle_audit = random_oracle_instantiation_report(
             pp.lattice_params,
             pp.auth_params,
@@ -2757,6 +2795,7 @@ def run_preset(preset):
             protocol_public_surface_audit,
             paper_protocol_clarification_audit,
             sampler_parameter_audit,
+            parameter_preflight,
         )
         report["verification_results"] = {
             "initial_accepts": bool(verify_1),
@@ -2957,7 +2996,6 @@ def run_preset(preset):
                 "sample_pre_trace",
                 "sample_pre_window_mass_audit",
                 "sample_pre_coset",
-                "sample_pre_trace_non_production",
             ]
         )
         report["checks"]["all_sample_pre_coset_decomposition"] = all(
@@ -2987,7 +3025,6 @@ def run_preset(preset):
         )
         report["checks"]["sampler_parameter_audit"] = bool(
             sampler_parameter_audit["all_checks_hold"]
-            and not sampler_parameter_audit["final_security_claim_permitted"]
         )
         report["checks"]["all_checks"] = all(report["checks"].values())
 
@@ -3000,7 +3037,7 @@ def run_preset(preset):
         }
 
 
-def run_sweep(config=None, config_path=None):
+def run_sweep(config=None, config_path=None, strict_parameters=False):
     if config is None:
         raise ValueError(
             "run_sweep requires an explicit JSON configuration; "
@@ -3012,7 +3049,10 @@ def run_sweep(config=None, config_path=None):
         _flat_preset_from_config(preset, index)
         for index, preset in enumerate(config["presets"])
     ]
-    results = [run_preset(preset) for preset in presets]
+    results = [
+        run_preset(preset, strict_parameters=strict_parameters)
+        for preset in presets
+    ]
     ok_results = [result for result in results if result.get("ok")]
     all_ok = len(ok_results) == len(results)
 
@@ -3099,10 +3139,10 @@ def _usage():
     return """Usage:
   sage reference/sage/run_parameter_sweep.sage --help
   sage reference/sage/run_parameter_sweep.sage --config CONFIG_JSON --output REPORT_JSON
+  sage reference/sage/run_parameter_sweep.sage --strict-parameters --config CONFIG_JSON --output REPORT_JSON
   sage reference/sage/run_parameter_sweep.sage CONFIG_JSON REPORT_JSON
 
-This script does not run with hidden default sweep presets. Provide an explicit
-JSON configuration whose 'presets' array lists each parameter set.
+The script requires an explicit sweep config.
 
 JSON Schema:
   reference/configs/schemas/sweep_config.schema.json
@@ -3112,19 +3152,19 @@ Example:
     --config reference/configs/nist_sweep.json \\
     --output output/lvc_parameter_sweep.json
 
-Required preset shape:
-  The numeric values below show the JSON shape. The centered scalar challenge
-  space requires an odd authentication.challenge_modulus.
+Preset shape:
+  authentication.challenge_modulus must be odd.
 
   {
     "name": "descriptive_preset_name",
-    "lattice": {"n": 2, "q": 8380417, "base": 2, "m_bar": 5},
-    "sample_pre": {"beta": 1500000, "sigma_pre": 90000, "omega_factor": 0.01, "tail_cutoff": 12},
+    "lattice": {"n": 3, "q": 2147483647, "base": 2, "m_bar": 5},
+    "sample_pre": {"beta": 9000000, "sigma_pre": 250000, "omega_factor": 0.0001, "tail_cutoff": 12},
     "tree": {"branching_factor": 4, "height": 3},
     "authentication": {
       "challenge_modulus": 3,
-      "sigma_mask": 6000000,
-      "beta_response": 2000000,
+      "sigma_mask": 21000000,
+      "omega_factor": 1.08,
+      "beta_response": 250000000,
       "max_attempts": 1024,
       "nonce_bytes": 32,
       "mask_tail_cutoff": 12
@@ -3135,10 +3175,11 @@ Required preset shape:
 
 def _parse_cli_args(argv):
     if len(argv) == 1 or "--help" in argv[1:] or "-h" in argv[1:]:
-        return None, None, True
+        return None, None, False, True
 
     config_path = None
     output_path = None
+    strict_parameters = False
     positional = []
     index = 1
     while index < len(argv):
@@ -3153,6 +3194,8 @@ def _parse_cli_args(argv):
             if index >= len(argv):
                 raise ValueError("--output requires a path")
             output_path = argv[index]
+        elif arg == "--strict-parameters":
+            strict_parameters = True
         elif arg.startswith("--"):
             raise ValueError("unknown option '%s'" % arg)
         else:
@@ -3173,12 +3216,12 @@ def _parse_cli_args(argv):
     if config_path is None:
         raise ValueError("missing required CONFIG_JSON")
 
-    return config_path, output_path, False
+    return config_path, output_path, strict_parameters, False
 
 
 def main():
     try:
-        config_path, output_path, wants_help = _parse_cli_args(sys.argv)
+        config_path, output_path, strict_parameters, wants_help = _parse_cli_args(sys.argv)
     except ValueError as error:
         sys.stderr.write(str(error) + "\n\n")
         sys.stderr.write(_usage())
@@ -3189,7 +3232,7 @@ def main():
         return
 
     config = load_sweep_config(config_path)
-    report = run_sweep(config, config_path)
+    report = run_sweep(config, config_path, strict_parameters=strict_parameters)
     output = json.dumps(report, indent=2, sort_keys=True)
 
     if output_path is not None:

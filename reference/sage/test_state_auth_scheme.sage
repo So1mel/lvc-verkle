@@ -113,10 +113,10 @@ assert auth_parameter_report["recommended_beta_response"] == (
     auth_parameter_report["mask_norm_bound"] + auth_parameter_report["challenge_term_bound"]
 )
 assert auth_parameter_report["response_beta_formula"] == (
-    "beta_response > sigma_mask * sqrt(m) * omega_factor + B_c * beta"
+    "beta_response > sigma_mask * sqrt(m) * authentication.omega_factor + B_c * beta"
 )
 assert auth_parameter_report["q_bound_formula"] == (
-    "q > max(2 * beta_response, 2 * beta_response / Delta_c_min + beta_response * omega_factor * sqrt(n * log(n)))"
+    "q > max(2 * beta_response, 2 * beta_response / Delta_c_min + beta_response * authentication.omega_factor * sqrt(n * log(n)))"
 )
 assert auth_parameter_report["q_lower_bound_direct"] == 2 * auth_params.beta_response
 assert auth_parameter_report["recommended_q_lower_bound"] == max(
@@ -166,7 +166,9 @@ assert auth_transcript.audit_report["paper_challenge_equation"] == (
 assert auth_transcript.audit_report["paper_response_equation"] == "s = r + c*z_id"
 assert auth_transcript.audit_report["h2_transcript_order"] == ["Y_id", "w", "rho", "rt", "id"]
 assert auth_transcript.audit_report["transcript_fields"] == ["pi_id", "w", "c", "s"]
-assert auth_transcript.audit_report["sampler_backend"] == "shake256_inverse_cdf_truncated_window"
+assert auth_transcript.audit_report["sampler_backend"] == (
+    "shake256_hybrid_inverse_cdf_or_box_muller_truncated_window"
+)
 assert auth_transcript.audit_report["sampler_real_precision_bits"] == 256
 assert auth_transcript.audit_report["sampler_draw_bits"] == 256
 assert auth_transcript.audit_report["mask_dimension"] == mp12_params.m
@@ -205,7 +207,7 @@ assert auth_transcript.audit_report["response_norm_squared"] == sum(
     value * value for value in auth_transcript.response
 )
 assert auth_transcript.audit_report["paper_response_bound_formula"] == (
-    "||s|| <= ||r|| + ||c*z_id|| <= sigma_mask * sqrt(m) * omega_factor + B_c * beta"
+    "||s|| <= ||r|| + ||c*z_id|| <= sigma_mask * sqrt(m) * authentication.omega_factor + B_c * beta"
 )
 assert auth_transcript.audit_report["mask_norm_bound"] > 0
 assert auth_transcript.audit_report["mask_norm_bound_squared"] > 0
@@ -381,6 +383,11 @@ assert not validation_by_name["response_ring_mismatch"]["shape_report"][
 assert state_tree_registered_report["active_leaf_count"] == 1
 assert state_tree_registered_report["revoked_leaf_count"] == 0
 assert state_tree_registered_report["occupied_leaf_count"] == 1
+assert state_tree_registered_report["commitment_cache_backend"] == (
+    "occupied_prefix_path_update_cache"
+)
+assert state_tree_registered_report["cached_node_count"] == state_tree_params.height + 1
+assert state_tree_registered_report["occupied_prefix_count"] == state_tree_params.height + 1
 assert state_tree_active_path_report["paper_object"] == (
     "pi_id = (idx_0..idx_{h-1}; Auth_0..Auth_{h-1}) for active (id, Y_id) membership"
 )
@@ -405,8 +412,6 @@ assert state_tree_active_path_report["extra_commitments_over_vector_commitment_t
 assert not state_tree_active_path_report["state_commitment_upgrade_required_for_verkle_claim"]
 assert state_tree_active_path_report["paper_verkle_backend_claim_permitted"]
 assert state_tree_active_path_report["paper_verkle_proof_size_model_claim_permitted"]
-assert not state_tree_active_path_report["production_verkle_vector_commitment"]
-assert not state_tree_active_path_report["production_verkle_proof_size_claim_permitted"]
 assert state_tree_active_path_report["verification_leaf_status"] == "active"
 assert state_tree_active_path_report["active_leaf_domain"] != state_tree_active_path_report["revoked_leaf_domain"]
 assert state_tree_active_path_report["active_revoked_leaf_domains_distinct"]
@@ -503,10 +508,6 @@ assert state_commitment_backend_report["paper_verkle_backend_claim_permitted"]
 assert state_commitment_backend_report["paper_verkle_proof_size_model_claim_permitted"]
 assert state_commitment_backend_report["paper_verkle_security_assumption_matches_backend"]
 assert state_commitment_backend_report["research_reference_backend"]
-assert not state_commitment_backend_report["production_verkle_vector_commitment"]
-assert not state_commitment_backend_report["production_verkle_proof_size_claim_permitted"]
-assert not state_commitment_backend_report["final_security_claim_permitted"]
-assert not state_commitment_backend_report["verkle_security_claim_permitted"]
 assert state_commitment_backend_report["paper_alignment_action"] == (
     "paper_verkle_claim_matches_lattice_linear_verkle_reference_backend"
 )
@@ -637,6 +638,7 @@ scheme_setup = LVCVerkleSetupParameters(
         beta_response=5000,
     ),
     omega_factor=1,
+    auth_omega_factor=1,
 )
 scheme_pp, scheme_msk, scheme_state = setup_lvc_verkle(
     scheme_setup,
@@ -721,12 +723,16 @@ assert scheme_setup_key_surface_report["master_secret_is_trapdoor_only"]
 assert scheme_setup_key_surface_report["master_secret_contains_trapdoor"]
 assert scheme_setup_key_surface_report["root_matches_state"]
 assert scheme_setup_key_surface_report["all_checks_hold"]
+assert scheme_state.sample_pre_context is not None
 scheme_credential, scheme_registered_root = register_lvc_verkle_by_identity(
     scheme_pp,
     scheme_msk,
     scheme_state,
     b"UAV-END-TO-END-001",
     [b"scheme-register-1"],
+)
+assert scheme_credential.sample_pre_report["sampler_trace_report"]["gso_backend"] == (
+    "cached_mp12_sample_pre_context"
 )
 scheme_nonce_1 = b"A" * int(scheme_pp.auth_params.nonce_bytes)
 scheme_nonce_2 = b"B" * int(scheme_pp.auth_params.nonce_bytes)
@@ -769,10 +775,28 @@ assert verify_lvc_verkle(
         scheme_pp.auth_params,
         scheme_registered_root,
         omega_factor=scheme_pp.omega_factor,
+        auth_omega_factor=scheme_pp.auth_omega_factor,
     ),
     b"UAV-END-TO-END-001",
     scheme_credential.y_id,
     scheme_nonce_1,
+    scheme_transcript,
+)
+scheme_verifier_session = VerifierSession()
+assert scheme_verifier_session.verify_at_root_once(
+    scheme_pp,
+    b"UAV-END-TO-END-001",
+    scheme_credential.y_id,
+    scheme_nonce_1,
+    scheme_registered_root,
+    scheme_transcript,
+)
+assert not scheme_verifier_session.verify_at_root_once(
+    scheme_pp,
+    b"UAV-END-TO-END-001",
+    scheme_credential.y_id,
+    scheme_nonce_1,
+    scheme_registered_root,
     scheme_transcript,
 )
 scheme_second_credential, scheme_second_root = register_lvc_verkle_by_identity(

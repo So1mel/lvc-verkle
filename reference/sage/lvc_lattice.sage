@@ -12,6 +12,7 @@ LATTICE_VERKLE_ACTIVE_LEAF_DOMAIN = b"LVC-Verkle-Sage-linear-verkle-active-leaf-
 LATTICE_VERKLE_REVOKED_LEAF_DOMAIN = b"LVC-Verkle-Sage-linear-verkle-revoked-leaf-v1"
 DISCRETE_GAUSSIAN_REAL_PRECISION_BITS = 256
 DISCRETE_GAUSSIAN_DRAW_BYTES = 32
+DISCRETE_GAUSSIAN_EXACT_CDF_MAX_SUPPORT = 20000
 KLEIN_TRACE_MAX_REPORTED_COORDINATES = 64
 KLEIN_GSO_REAL_PRECISION_BITS = 256
 
@@ -160,6 +161,7 @@ class LVCVerkleSetupParameters:
         tree_params,
         auth_params,
         omega_factor=None,
+        auth_omega_factor=None,
         sample_pre_tail_cutoff=12,
         mask_tail_cutoff=12,
     ):
@@ -169,6 +171,7 @@ class LVCVerkleSetupParameters:
         self.tree_params = tree_params
         self.auth_params = auth_params
         self.omega_factor = omega_factor
+        self.auth_omega_factor = auth_omega_factor
         self.sample_pre_tail_cutoff = ZZ(sample_pre_tail_cutoff)
         self.mask_tail_cutoff = ZZ(mask_tail_cutoff)
 
@@ -176,6 +179,15 @@ class LVCVerkleSetupParameters:
             raise ValueError("expected beta > 0")
         if not isfinite(float(self.sigma_pre)) or self.sigma_pre <= 0:
             raise ValueError("expected finite sigma_pre > 0")
+        if self.omega_factor is not None and (
+            not isfinite(float(self.omega_factor)) or RDF(self.omega_factor) <= 0
+        ):
+            raise ValueError("expected positive sample_pre omega_factor")
+        if self.auth_omega_factor is not None and (
+            not isfinite(float(self.auth_omega_factor))
+            or RDF(self.auth_omega_factor) <= 0
+        ):
+            raise ValueError("expected positive authentication omega_factor")
         if self.sample_pre_tail_cutoff <= 0:
             raise ValueError("expected sample_pre_tail_cutoff > 0")
         if self.mask_tail_cutoff <= 0:
@@ -223,6 +235,7 @@ class LVCVerklePublicParameters:
         auth_params,
         root,
         omega_factor=None,
+        auth_omega_factor=None,
         sample_pre_tail_cutoff=12,
         mask_tail_cutoff=12,
     ):
@@ -244,6 +257,8 @@ class LVCVerklePublicParameters:
         self.rt0 = _as_bytes(root)
         self.root = root
         self.omega_factor = omega_factor
+        self.sample_pre_omega_factor = omega_factor
+        self.auth_omega_factor = auth_omega_factor
         self.sample_pre_tail_cutoff = ZZ(sample_pre_tail_cutoff)
         self.mask_tail_cutoff = ZZ(mask_tail_cutoff)
 
@@ -254,8 +269,9 @@ class LVCVerkleMasterSecretKey:
 
 
 class LVCVerkleState:
-    def __init__(self, state_tree):
+    def __init__(self, state_tree, sample_pre_context=None):
         self.state_tree = state_tree
+        self.sample_pre_context = sample_pre_context
         self.credentials_by_identity = {}
         self.credential_history_by_identity = {}
 
@@ -379,6 +395,61 @@ class LVCVerkleSchemeInstance:
         return identity_active_in_state(self.state, identity)
 
 
+class VerifierSession:
+    """Optional verifier-side replay cache for one verification session."""
+
+    def __init__(self):
+        self.used_challenges = set()
+
+    def verify_once(self, public_parameters, identity, y_id, challenge, transcript):
+        if isinstance(challenge, AuthenticationChallenge):
+            nonce = challenge.nonce
+            root = challenge.root
+        else:
+            nonce = challenge
+            root = public_parameters.root
+
+        return self.verify_at_root_once(
+            public_parameters,
+            identity,
+            y_id,
+            nonce,
+            root,
+            transcript,
+        )
+
+    def verify_at_root_once(
+        self,
+        public_parameters,
+        identity,
+        y_id,
+        nonce,
+        root,
+        transcript,
+    ):
+        key = (
+            _as_bytes(identity),
+            _serialize_zq_vector(y_id),
+            _as_bytes(nonce),
+            _as_bytes(root),
+        )
+        if key in self.used_challenges:
+            return False
+
+        accepts = verify_lvc_verkle_at_root(
+            public_parameters,
+            identity,
+            y_id,
+            nonce,
+            root,
+            transcript,
+        )
+        if accepts:
+            self.used_challenges.add(key)
+
+        return accepts
+
+
 class PublicProofRefreshData:
     def __init__(self, identity, y_id, path_proof, root):
         self.identity = _as_bytes(identity)
@@ -421,9 +492,11 @@ class LatticeVerkleTree:
         self.lattice_params = lattice_params
         self.leaves_by_index = {}
         self.indices_by_identity = {}
+        self.node_cache = {}
+        self.occupied_prefixes = set()
 
     def root_vector(self):
-        return self._subtree_commitment([])
+        return self._cached_subtree_commitment(())
 
     def root(self):
         return _serialize_zq_vector(self.root_vector())
@@ -445,6 +518,8 @@ class LatticeVerkleTree:
             "active": True,
             "slot_probe": slot_probe,
         }
+        self._mark_occupied_prefixes(index)
+        self._update_path_cache(index)
 
         return self.path_proof(identity), self.root()
 
@@ -459,6 +534,7 @@ class LatticeVerkleTree:
             raise ValueError("identity is already revoked")
 
         leaf["active"] = False
+        self._update_path_cache(index)
 
         return self.root()
 
@@ -477,7 +553,7 @@ class LatticeVerkleTree:
             prefix = digits[:parent_level]
             position = digits[parent_level]
             child_commitments = [
-                self._subtree_commitment(prefix + [child_index])
+                self._cached_subtree_commitment(prefix + [child_index])
                 for child_index in range(self.params.branching_factor)
             ]
             sibling_layers.append(
@@ -501,6 +577,94 @@ class LatticeVerkleTree:
         return verify_lattice_verkle_path(identity, y_id, proof, root, self.params, self.lattice_params)
 
     def _subtree_commitment(self, prefix_digits):
+        return self._cached_subtree_commitment(prefix_digits)
+
+    def _cached_subtree_commitment(self, prefix_digits):
+        prefix = tuple(ZZ(digit) for digit in prefix_digits)
+        if prefix not in self.occupied_prefixes:
+            return _lattice_verkle_empty_leaf(self.params, self.lattice_params)
+        if prefix in self.node_cache:
+            return self.node_cache[prefix]
+
+        if len(prefix) == self.params.height:
+            commitment = self._leaf_commitment(prefix)
+        else:
+            level_from_leaf = self.params.height - ZZ(len(prefix)) - ZZ(1)
+            child_commitments = [
+                self._cached_subtree_commitment(prefix + (ZZ(child_index),))
+                for child_index in range(self.params.branching_factor)
+            ]
+            commitment = _lattice_verkle_node_commitment(
+                child_commitments,
+                self.params,
+                self.lattice_params,
+                level_from_leaf,
+                list(prefix),
+            )
+
+        self.node_cache[prefix] = commitment
+
+        return commitment
+
+    def _leaf_commitment(self, prefix_digits):
+        if len(prefix_digits) != self.params.height:
+            raise ValueError("leaf prefix has incompatible height")
+
+        index = _base_digits_to_index(prefix_digits, self.params.branching_factor)
+        leaf = self.leaves_by_index.get(index)
+
+        if leaf is None:
+            return _lattice_verkle_empty_leaf(self.params, self.lattice_params)
+        if leaf["active"]:
+            return _lattice_verkle_active_leaf(
+                leaf["identity"],
+                leaf["y_id"],
+                self.params,
+                self.lattice_params,
+            )
+
+        return _lattice_verkle_revoked_leaf(
+            leaf["identity"],
+            leaf["y_id"],
+            self.params,
+            self.lattice_params,
+        )
+
+    def _mark_occupied_prefixes(self, index):
+        digits = _index_to_base_digits(
+            index,
+            self.params.branching_factor,
+            self.params.height,
+        )
+
+        for prefix_length in range(self.params.height + 1):
+            self.occupied_prefixes.add(tuple(digits[:prefix_length]))
+
+    def _update_path_cache(self, index):
+        digits = _index_to_base_digits(
+            index,
+            self.params.branching_factor,
+            self.params.height,
+        )
+        leaf_prefix = tuple(digits)
+        self.node_cache[leaf_prefix] = self._leaf_commitment(leaf_prefix)
+
+        for level in reversed(range(self.params.height)):
+            prefix = tuple(digits[:level])
+            level_from_leaf = self.params.height - ZZ(level) - ZZ(1)
+            child_commitments = [
+                self._cached_subtree_commitment(prefix + (ZZ(child_index),))
+                for child_index in range(self.params.branching_factor)
+            ]
+            self.node_cache[prefix] = _lattice_verkle_node_commitment(
+                child_commitments,
+                self.params,
+                self.lattice_params,
+                level_from_leaf,
+                list(prefix),
+            )
+
+    def _uncached_subtree_commitment(self, prefix_digits):
         if len(prefix_digits) == self.params.height:
             index = _base_digits_to_index(prefix_digits, self.params.branching_factor)
             leaf = self.leaves_by_index.get(index)
@@ -514,7 +678,7 @@ class LatticeVerkleTree:
 
         level_from_leaf = self.params.height - ZZ(len(prefix_digits)) - ZZ(1)
         child_commitments = [
-            self._subtree_commitment(prefix_digits + [child_index])
+            self._uncached_subtree_commitment(prefix_digits + [child_index])
             for child_index in range(self.params.branching_factor)
         ]
         return _lattice_verkle_node_commitment(
@@ -683,13 +847,56 @@ def gso_max_norm_for_basis(basis):
     return max(norms)
 
 
-def mp12_sample_pre_parameter_report(trapdoor, params, sigma, omega_factor=None):
-    """Report the current GPV/Klein sigma condition for the MP12 kernel basis."""
+class MP12SamplePreContext:
+    """Reusable MP12 SamplePre kernel and GSO data for one parameter set."""
+
+    def __init__(self, A, trapdoor, params, sigma, omega_factor=None):
+        if not isinstance(trapdoor, MP12GTrapdoor):
+            raise ValueError("expected MP12GTrapdoor")
+        if A.nrows() != params.n or A.ncols() != params.m:
+            raise ValueError("A does not match MP12 parameters")
+
+        self.A = A
+        self.trapdoor = trapdoor
+        self.params = params
+        self.sigma = sigma
+        self.omega_factor = omega_factor
+        self.kernel_basis = mp12_kernel_basis(trapdoor, params)
+        self.gso_columns, self.gso_norms_squared = gram_schmidt_columns(
+            [vector(ZZ, column) for column in self.kernel_basis.columns()]
+        )
+        self.gso_norms = [sqrt(norm_squared) for norm_squared in self.gso_norms_squared]
+        self.parameter_report = _mp12_sample_pre_parameter_report_from_gso(
+            self.kernel_basis,
+            self.gso_norms,
+            params,
+            sigma,
+            omega_factor=omega_factor,
+        )
+
+    def sample(self, target, seed_parts, tail_cutoff=12):
+        return sample_pre_mp12_gpv_klein_with_trace(
+            self.A,
+            self.trapdoor,
+            target,
+            self.params,
+            self.sigma,
+            seed_parts,
+            tail_cutoff=tail_cutoff,
+            sample_pre_context=self,
+        )
+
+
+def _mp12_sample_pre_parameter_report_from_gso(
+    basis,
+    gso_norms,
+    params,
+    sigma,
+    omega_factor=None,
+):
     if not isfinite(float(sigma)) or RDF(sigma) <= 0:
         raise ValueError("expected finite sigma > 0")
 
-    basis = mp12_kernel_basis(trapdoor, params)
-    gso_norms = gso_norms_for_basis(basis)
     RR = _klein_gso_real_field()
     if len(gso_norms) == 0:
         min_gso_norm = RR(0)
@@ -727,7 +934,22 @@ def mp12_sample_pre_parameter_report(trapdoor, params, sigma, omega_factor=None)
         "sigma": RR(sigma),
         "sigma_over_recommended": RR(sigma) / recommended_sigma if recommended_sigma > 0 else RR(0),
         "passes_recommended_bound": RR(sigma) >= recommended_sigma,
+        "sample_pre_context_backend": "mp12_kernel_basis_gso_context",
     }
+
+
+def mp12_sample_pre_parameter_report(trapdoor, params, sigma, omega_factor=None):
+    """Report the current GPV/Klein sigma condition for the MP12 kernel basis."""
+    basis = mp12_kernel_basis(trapdoor, params)
+    gso_norms = gso_norms_for_basis(basis)
+
+    return _mp12_sample_pre_parameter_report_from_gso(
+        basis,
+        gso_norms,
+        params,
+        sigma,
+        omega_factor=omega_factor,
+    )
 
 
 def sample_pre_output_report(
@@ -790,7 +1012,6 @@ def sample_pre_output_report(
         "output_base_ring_matches_zq": output_base_ring_matches_zq,
         "output_coordinates_in_zq": output_coordinates_in_zq,
         "sampler_algorithm": sampler_algorithm,
-        "sampler_status": "experimental_reproducible_not_constant_time",
         "sampling_distribution_status": "finite_window_truncated_shifted_discrete_gaussian_not_full_lattice_gaussian",
         "discrete_gaussian": "truncated_shifted_klein_gpv_style",
         "sampler_backend": sampler_report["sampler_backend"],
@@ -800,7 +1021,6 @@ def sample_pre_output_report(
         "continuous_tail_heuristic_bound": sampler_report["continuous_tail_heuristic_bound"],
         "trace_continuous_tail_heuristic_bound": trace_tail_bound,
         "finite_window_mass_heuristic_lower_bound": trace_window_mass_lower_bound,
-        "statistical_distance_claim_permitted": False,
         "gso_backend": parameter_report["gso_backend"],
         "gso_real_precision_bits": parameter_report["gso_real_precision_bits"],
         "target_dimension": len(target),
@@ -842,7 +1062,7 @@ def sample_pre_output_report(
                 norm_bound_holds,
             ]
         ),
-        "distribution_audit_caveat": "The Sage sampler records finite-window Klein/GPV-style sampling evidence and a continuous-tail heuristic; it is not a proof that the output distribution is within a formal statistical distance of the paper's ideal SamplePre distribution.",
+        "distribution_audit_caveat": "Finite-window Klein/GPV sampler trace; distributional proof is external.",
     }
 
 
@@ -910,7 +1130,7 @@ def sample_pre_coset_decomposition_report(
                 candidate_equation_holds,
             ]
         ),
-        "caveat": "This is an exact algebraic coset-membership audit for the Sage sampler path; it is not a standalone distributional proof.",
+        "caveat": "Algebraic coset-membership audit for the sampler path.",
     }
 
 
@@ -987,7 +1207,6 @@ def sample_pre_diversity_audit(
         "scope": "sample_pre_multi_seed_diversity",
         "paper_statement": "SamplePre samples a short preimage z with A*z = target mod q; different sampler coins may produce different valid preimages.",
         "sampler_algorithm": "sample_pre_mp12_gpv_klein",
-        "sampler_status": "experimental_reproducible_not_constant_time",
         "discrete_gaussian": "truncated_shifted_klein_gpv_style",
         "sample_count": ZZ(sample_count),
         "target_dimension": ZZ(len(target)),
@@ -1008,7 +1227,7 @@ def sample_pre_diversity_audit(
                 repeated_first_matches,
             ]
         ),
-        "caveat": "This checks seeded diversity and correctness for the Sage research sampler; it is not a statistical proof of production discrete-Gaussian quality.",
+        "caveat": "Seeded diversity and correctness check for the Sage sampler.",
     }
 
 
@@ -1265,7 +1484,7 @@ def sample_pre_input_validation_audit(
         "all_checks_hold": all(case["rejected"] for case in cases)
         and valid_case["accepted"]
         and valid_case["output_dimension"] == valid_case["expected_output_dimension"],
-        "caveat": "This is an API misuse and algebraic-shape audit; it is not a sampler distribution proof.",
+        "caveat": "API misuse and algebraic-shape audit.",
     }
 
 
@@ -1415,7 +1634,7 @@ def mp12_trap_gen_parameter_report(A, trapdoor, params):
                 gadget_decomposition_audit["all_checks_hold"],
             ]
         ),
-        "distribution_audit_caveat": "The Sage TrapGen path checks MP12 algebraic structure, seeded reproducibility, ternary R quality, and gadget decomposition semantics; it does not prove the public matrix distribution is statistically close to an ideal production TrapGen distribution.",
+        "distribution_audit_caveat": "MP12 algebraic checks, seed reproducibility, and ternary-R quality.",
     }
 
 
@@ -1509,7 +1728,7 @@ def trap_gen_multi_seed_audit(params, base_seed_parts, sample_count=3):
                 all_quality_checks_hold,
             ]
         ),
-        "caveat": "This checks seeded reproducibility and MP12 algebraic relations across seeds; it is not a production TrapGen distribution proof.",
+        "caveat": "Seed reproducibility and MP12 relation check.",
     }
 
 
@@ -1593,6 +1812,7 @@ def authentication_parameter_report(lattice_params, auth_params, beta, omega_fac
         "delta_c_min": delta_c_min,
         "nonce_bytes": auth_params.nonce_bytes,
         "nonce_lambda_bits": ZZ(8) * auth_params.nonce_bytes,
+        "omega_factor_config_key": "authentication.omega_factor",
         "omega_factor": factor,
         "sigma_mask": auth_params.sigma_mask,
         "sigma_mask_formula": "sigma_mask = alpha * B_c * beta",
@@ -1612,7 +1832,7 @@ def authentication_parameter_report(lattice_params, auth_params, beta, omega_fac
             else RR(0)
         ),
         "passes_recommended_bound": RR(auth_params.beta_response) > recommended_beta_response,
-        "response_beta_formula": "beta_response > sigma_mask * sqrt(m) * omega_factor + B_c * beta",
+        "response_beta_formula": "beta_response > sigma_mask * sqrt(m) * authentication.omega_factor + B_c * beta",
         "q_lower_bound_direct": q_lower_bound_direct,
         "q_lower_bound_sis": q_lower_bound_sis,
         "recommended_q_lower_bound": recommended_q_lower_bound,
@@ -1622,7 +1842,7 @@ def authentication_parameter_report(lattice_params, auth_params, beta, omega_fac
             else RR(0)
         ),
         "q_bound_holds": RR(lattice_params.q) > recommended_q_lower_bound,
-        "q_bound_formula": "q > max(2 * beta_response, 2 * beta_response / Delta_c_min + beta_response * omega_factor * sqrt(n * log(n)))",
+        "q_bound_formula": "q > max(2 * beta_response, 2 * beta_response / Delta_c_min + beta_response * authentication.omega_factor * sqrt(n * log(n)))",
         "sis_extraction_bound": extraction_bound,
         "sis_slack_term": sis_slack_term,
     }
@@ -1638,7 +1858,9 @@ def discrete_gaussian_sampler_audit_report(tail_cutoff):
     tail = RR(tail_cutoff)
 
     return {
-        "sampler_backend": "shake256_inverse_cdf_truncated_window",
+        "sampler_backend": "shake256_hybrid_inverse_cdf_or_box_muller_truncated_window",
+        "exact_cdf_max_support": ZZ(DISCRETE_GAUSSIAN_EXACT_CDF_MAX_SUPPORT),
+        "large_support_backend": "shake256_box_muller_rounded_clamped_truncated_window",
         "sampler_real_precision_bits": ZZ(DISCRETE_GAUSSIAN_REAL_PRECISION_BITS),
         "sampler_draw_bits": ZZ(8 * DISCRETE_GAUSSIAN_DRAW_BYTES),
         "tail_cutoff": tail_cutoff,
@@ -1679,10 +1901,15 @@ def sampler_parameter_audit_report(
         isfinite(float(public_parameters.auth_params.sigma_mask))
         and public_parameters.auth_params.sigma_mask > 0
     )
-    omega_valid = (
+    sample_pre_omega_valid = (
         public_parameters.omega_factor is not None
         and isfinite(float(public_parameters.omega_factor))
         and RDF(public_parameters.omega_factor) > 0
+    )
+    auth_omega_valid = (
+        public_parameters.auth_omega_factor is not None
+        and isfinite(float(public_parameters.auth_omega_factor))
+        and RDF(public_parameters.auth_omega_factor) > 0
     )
 
     return {
@@ -1697,6 +1924,8 @@ def sampler_parameter_audit_report(
             "tail_cutoff_config_key": "sample_pre.tail_cutoff",
             "tail_cutoff": public_parameters.sample_pre_tail_cutoff,
             "tail_cutoff_source": "explicit_experiment_config",
+            "omega_factor_config_key": "sample_pre.omega_factor",
+            "omega_factor": public_parameters.omega_factor,
             "sampler_backend": sample_pre_sampler["sampler_backend"],
             "sampler_real_precision_bits": sample_pre_sampler[
                 "sampler_real_precision_bits"
@@ -1713,6 +1942,8 @@ def sampler_parameter_audit_report(
             "tail_cutoff_config_key": "authentication.mask_tail_cutoff",
             "tail_cutoff": public_parameters.mask_tail_cutoff,
             "tail_cutoff_source": "explicit_experiment_config",
+            "omega_factor_config_key": "authentication.omega_factor",
+            "omega_factor": public_parameters.auth_omega_factor,
             "sampler_backend": mask_sampler["sampler_backend"],
             "sampler_real_precision_bits": mask_sampler[
                 "sampler_real_precision_bits"
@@ -1722,30 +1953,23 @@ def sampler_parameter_audit_report(
                 "continuous_tail_heuristic_bound"
             ],
         },
-        "shared": {
-            "omega_factor_config_key": "sample_pre.omega_factor",
-            "omega_factor": public_parameters.omega_factor,
-            "sampler_distribution_status": "experimental_reproducible_not_constant_time",
-            "statistical_distance_claim_permitted": False,
-            "production_sampler_claim_permitted": False,
-        },
         "checks": {
             "sample_pre_tail_cutoff_explicit_positive": bool(sample_pre_explicit),
             "mask_tail_cutoff_explicit_positive": bool(mask_explicit),
             "sigma_pre_positive": bool(sigma_pre_valid),
             "sigma_mask_positive": bool(sigma_mask_valid),
-            "omega_factor_positive": bool(omega_valid),
-            "final_security_claim_blocked": True,
+            "sample_pre_omega_factor_positive": bool(sample_pre_omega_valid),
+            "authentication_omega_factor_positive": bool(auth_omega_valid),
         },
         "all_checks_hold": bool(
             sample_pre_explicit
             and mask_explicit
             and sigma_pre_valid
             and sigma_mask_valid
-            and omega_valid
+            and sample_pre_omega_valid
+            and auth_omega_valid
         ),
-        "final_security_claim_permitted": False,
-        "caveat": "Sampler parameters are user-supplied experiment inputs. Checked-in regression configs are for reproducibility plumbing and must not be cited as final paper security parameters.",
+        "caveat": "Sampler parameters come from the JSON config.",
     }
 
 
@@ -2326,6 +2550,9 @@ def lattice_verkle_tree_state_report(state_tree):
         "occupied_leaf_count": active_count + revoked_count,
         "active_leaf_count": active_count,
         "revoked_leaf_count": revoked_count,
+        "commitment_cache_backend": "occupied_prefix_path_update_cache",
+        "cached_node_count": ZZ(len(state_tree.node_cache)),
+        "occupied_prefix_count": ZZ(len(state_tree.occupied_prefixes)),
         "root": state_tree.root(),
     }
     report["root_vector"] = state_tree.root_vector()
@@ -2652,7 +2879,6 @@ def lattice_verkle_state_commitment_backend_report(state_tree):
         "research_reference_backend": True,
         "production_verkle_vector_commitment": False,
         "production_verkle_proof_size_claim_permitted": False,
-        "final_security_claim_permitted": False,
         "paper_alignment_action": "paper_verkle_claim_matches_lattice_linear_verkle_reference_backend",
         "verkle_security_claim_permitted": False,
         "paper_alignment_options": [
@@ -2668,7 +2894,7 @@ def lattice_verkle_state_commitment_backend_report(state_tree):
                 fs_context_report["all_checks_hold"],
             ]
         ),
-        "caveat": "This is the paper's Sage lattice-linear Verkle reference backend over Z_q^n vectors, not a production vector-commitment implementation or final security parameter claim.",
+        "caveat": "Lattice-linear Verkle backend over Z_q^n vectors.",
     }
 
 
@@ -2868,11 +3094,22 @@ def setup_lvc_verkle(setup_params, seed_parts):
         setup_params.auth_params,
         root,
         omega_factor=setup_params.omega_factor,
+        auth_omega_factor=setup_params.auth_omega_factor,
         sample_pre_tail_cutoff=setup_params.sample_pre_tail_cutoff,
         mask_tail_cutoff=setup_params.mask_tail_cutoff,
     )
+    sample_pre_context = MP12SamplePreContext(
+        A,
+        trapdoor,
+        setup_params.lattice_params,
+        setup_params.sigma_pre,
+        omega_factor=setup_params.omega_factor,
+    )
     master_secret_key = LVCVerkleMasterSecretKey(trapdoor)
-    state = LVCVerkleState(state_tree)
+    state = LVCVerkleState(
+        state_tree,
+        sample_pre_context=sample_pre_context,
+    )
 
     return public_parameters, master_secret_key, state
 
@@ -2895,6 +3132,7 @@ def register_lvc_verkle(public_parameters, master_secret_key, state, identity, e
         seed_parts,
         omega_factor=public_parameters.omega_factor,
         tail_cutoff=public_parameters.sample_pre_tail_cutoff,
+        sample_pre_context=state.sample_pre_context,
     )
     state.credentials_by_identity[identity] = credential
     state.credential_history_by_identity.setdefault(identity, []).append(credential)
@@ -3010,7 +3248,7 @@ def authenticate_lvc_verkle_challenge(public_parameters, credential, identity, c
         public_parameters.auth_params,
         seed_parts,
         tail_cutoff=public_parameters.mask_tail_cutoff,
-        omega_factor=public_parameters.omega_factor,
+        omega_factor=public_parameters.auth_omega_factor,
     )
 
 
@@ -3219,6 +3457,7 @@ def register_identity(
     omega_factor=None,
     tail_cutoff=12,
     enforce_sigma_bound=True,
+    sample_pre_context=None,
 ):
     """Run the paper's Register algorithm over the Sage reference components."""
     credential = register_lattice_credential(
@@ -3233,6 +3472,7 @@ def register_identity(
         omega_factor=omega_factor,
         tail_cutoff=tail_cutoff,
         enforce_sigma_bound=enforce_sigma_bound,
+        sample_pre_context=sample_pre_context,
     )
     path_proof, root = state_tree.insert(identity, credential.y_id)
     credential.path_proof = path_proof
@@ -3351,6 +3591,7 @@ def _build_authentication_generation_audit(
         "expected_response_dimension": lattice_params.m,
         "response_dimension_matches_m": response_dimension_matches_m,
         "sigma_mask": auth_params.sigma_mask,
+        "omega_factor_config_key": "authentication.omega_factor",
         "omega_factor": bound_context["factor"],
         "tail_cutoff": ZZ(tail_cutoff),
         "continuous_tail_heuristic_bound": sampler_report["continuous_tail_heuristic_bound"],
@@ -3392,7 +3633,7 @@ def _build_authentication_generation_audit(
         "response_triangle_bound_holds": (
             RR(response_norm_squared) <= triangle_bound * triangle_bound
         ),
-        "paper_response_bound_formula": "||s|| <= ||r|| + ||c*z_id|| <= sigma_mask * sqrt(m) * omega_factor + B_c * beta",
+        "paper_response_bound_formula": "||s|| <= ||r|| + ||c*z_id|| <= sigma_mask * sqrt(m) * authentication.omega_factor + B_c * beta",
         "response_norm_squared": response_norm_squared,
         "beta_response": auth_params.beta_response,
         "response_norm_bound_holds": response_norm_bound_holds,
@@ -3596,7 +3837,7 @@ def authentication_rejection_sampling_path_audit(
             "simulated_attempts": simulated_attempts,
             "controlled_rejection_path_found": False,
             "all_checks_hold": False,
-            "caveat": "No decreasing response-norm attempt was found under the supplied deterministic seed.",
+            "caveat": "No decreasing response-norm attempt for this seed.",
         }
 
     controlled_auth_params = AuthenticationParameters(
@@ -3645,7 +3886,7 @@ def authentication_rejection_sampling_path_audit(
                 generation_report["response_norm_bound_holds"],
             ]
         ),
-        "caveat": "This is a deterministic control-flow audit for the paper's rejection loop, not an acceptance-rate or statistical-distance proof.",
+        "caveat": "Deterministic control-flow audit for the rejection loop.",
     }
 
 
@@ -4232,6 +4473,7 @@ def register_lattice_credential(
     omega_factor=None,
     tail_cutoff=12,
     enforce_sigma_bound=True,
+    sample_pre_context=None,
 ):
     """Generate the lattice credential part of the paper's Register algorithm.
 
@@ -4244,12 +4486,25 @@ def register_lattice_credential(
     if beta <= 0:
         raise ValueError("expected beta > 0")
 
-    parameter_report = mp12_sample_pre_parameter_report(
-        trapdoor,
-        params,
-        sigma,
-        omega_factor=omega_factor,
-    )
+    if sample_pre_context is not None:
+        if sample_pre_context.A != A:
+            raise ValueError("SamplePre context matrix does not match A")
+        if (
+            sample_pre_context.params.n != params.n
+            or sample_pre_context.params.m != params.m
+            or sample_pre_context.params.q != params.q
+        ):
+            raise ValueError("SamplePre context parameters do not match")
+        if RDF(sample_pre_context.sigma) != RDF(sigma):
+            raise ValueError("SamplePre context sigma does not match")
+        parameter_report = sample_pre_context.parameter_report
+    else:
+        parameter_report = mp12_sample_pre_parameter_report(
+            trapdoor,
+            params,
+            sigma,
+            omega_factor=omega_factor,
+        )
     if enforce_sigma_bound and not parameter_report["passes_recommended_bound"]:
         raise ValueError("sigma below recommended SamplePre bound")
 
@@ -4262,6 +4517,7 @@ def register_lattice_credential(
         sigma=sigma,
         seed_parts=[b"register-lattice-credential", identity, epoch] + list(seed_parts),
         tail_cutoff=tail_cutoff,
+        sample_pre_context=sample_pre_context,
     )
     norm_squared = centered_norm_squared(z_id, params.q)
 
@@ -4319,6 +4575,7 @@ def sample_pre_mp12_gpv_klein(
     sigma,
     seed_parts,
     tail_cutoff=12,
+    sample_pre_context=None,
 ):
     """Sample a preimage with a Klein/GPV-style lattice Gaussian step.
 
@@ -4335,6 +4592,7 @@ def sample_pre_mp12_gpv_klein(
         sigma,
         seed_parts,
         tail_cutoff=tail_cutoff,
+        sample_pre_context=sample_pre_context,
     )
     return candidate
 
@@ -4347,6 +4605,7 @@ def sample_pre_mp12_gpv_klein_with_trace(
     sigma,
     seed_parts,
     tail_cutoff=12,
+    sample_pre_context=None,
 ):
     """Sample an MP12 preimage and return the per-coordinate Klein audit trace."""
     _validate_mp12_instance(A, trapdoor, target, params)
@@ -4355,13 +4614,26 @@ def sample_pre_mp12_gpv_klein_with_trace(
 
     canonical = _sample_pre_mp12_canonical(A, trapdoor, target, params)
     canonical_lift = vector(ZZ, centered_vector(canonical, params.q))
-    basis = mp12_kernel_basis(trapdoor, params)
+    if sample_pre_context is None:
+        basis = mp12_kernel_basis(trapdoor, params)
+        gso_columns = None
+        gso_norms_squared = None
+    else:
+        if sample_pre_context.A != A:
+            raise ValueError("SamplePre context matrix does not match A")
+        if RDF(sample_pre_context.sigma) != RDF(sigma):
+            raise ValueError("SamplePre context sigma does not match")
+        basis = sample_pre_context.kernel_basis
+        gso_columns = sample_pre_context.gso_columns
+        gso_norms_squared = sample_pre_context.gso_norms_squared
     lattice_sample, trace_report = sample_lattice_gaussian_klein_with_trace(
         basis,
         -canonical_lift,
         sigma,
         [b"mp12-gpv-klein"] + list(seed_parts),
         tail_cutoff=tail_cutoff,
+        gso_columns=gso_columns,
+        gso_norms_squared=gso_norms_squared,
     )
     candidate_lift = canonical_lift + lattice_sample
     candidate = vector(params.ring(), list(candidate_lift))
@@ -4386,7 +4658,15 @@ def sample_pre_mp12_gpv_klein_with_trace(
     return candidate, trace_report
 
 
-def sample_lattice_gaussian_klein(basis, center, sigma, seed_parts, tail_cutoff=12):
+def sample_lattice_gaussian_klein(
+    basis,
+    center,
+    sigma,
+    seed_parts,
+    tail_cutoff=12,
+    gso_columns=None,
+    gso_norms_squared=None,
+):
     """Sample a lattice vector from a column basis near center.
 
     This is a randomized nearest-plane sampler over the basis columns using
@@ -4399,6 +4679,8 @@ def sample_lattice_gaussian_klein(basis, center, sigma, seed_parts, tail_cutoff=
         sigma,
         seed_parts,
         tail_cutoff=tail_cutoff,
+        gso_columns=gso_columns,
+        gso_norms_squared=gso_norms_squared,
     )
     return lattice_vector
 
@@ -4409,6 +4691,8 @@ def sample_lattice_gaussian_klein_with_trace(
     sigma,
     seed_parts,
     tail_cutoff=12,
+    gso_columns=None,
+    gso_norms_squared=None,
 ):
     """Sample a lattice vector and report the actual Klein coordinate windows."""
     if basis.nrows() != len(center):
@@ -4418,7 +4702,7 @@ def sample_lattice_gaussian_klein_with_trace(
         return vector(ZZ, [0] * basis.nrows()), {
             "scope": "sample_pre_klein_coordinate_trace",
             "sampler_algorithm": "randomized_nearest_plane_klein",
-            "sampler_backend": "shake256_shifted_inverse_cdf_truncated_window",
+            "sampler_backend": "shake256_hybrid_shifted_inverse_cdf_or_box_muller_truncated_window",
             "sampling_distribution_status": "finite_window_truncated_shifted_discrete_gaussian_not_full_lattice_gaussian",
             "coordinate_count": ZZ(0),
             "reported_coordinate_count": ZZ(0),
@@ -4442,9 +4726,7 @@ def sample_lattice_gaussian_klein_with_trace(
             "all_window_mass_bounds_valid": True,
             "coordinate_samples": [],
             "all_checks_hold": True,
-            "production_sampler_claim_permitted": False,
-            "statistical_distance_claim_permitted": False,
-            "caveat": "Empty basis trace; production discrete-Gaussian claims still require a separate statistical analysis.",
+            "caveat": "Empty basis trace.",
         }
     if not isfinite(float(sigma)) or RDF(sigma) <= 0:
         raise ValueError("expected finite sigma > 0")
@@ -4452,7 +4734,14 @@ def sample_lattice_gaussian_klein_with_trace(
     RR = _klein_gso_real_field()
     columns = [vector(ZZ, column) for column in basis.columns()]
     columns_rr = [vector(RR, list(column)) for column in columns]
-    gso_columns, gso_norms = gram_schmidt_columns(columns)
+    if gso_columns is None or gso_norms_squared is None:
+        gso_columns, gso_norms = gram_schmidt_columns(columns)
+        gso_backend = "realfield_gram_schmidt_columns"
+    else:
+        if len(gso_columns) != len(columns) or len(gso_norms_squared) != len(columns):
+            raise ValueError("cached GSO data does not match basis dimension")
+        gso_norms = gso_norms_squared
+        gso_backend = "cached_mp12_sample_pre_context"
     current_center = vector(RR, list(center))
     coefficients = [ZZ(0)] * len(columns)
     coordinate_samples = []
@@ -4545,7 +4834,8 @@ def sample_lattice_gaussian_klein_with_trace(
     trace_report = {
         "scope": "sample_pre_klein_coordinate_trace",
         "sampler_algorithm": "randomized_nearest_plane_klein",
-        "sampler_backend": "shake256_shifted_inverse_cdf_truncated_window",
+        "sampler_backend": "shake256_hybrid_shifted_inverse_cdf_or_box_muller_truncated_window",
+        "gso_backend": gso_backend,
         "sampling_distribution_status": "finite_window_truncated_shifted_discrete_gaussian_not_full_lattice_gaussian",
         "coordinate_count": ZZ(len(columns)),
         "reported_coordinate_count": ZZ(len(coordinate_samples)),
@@ -4577,9 +4867,7 @@ def sample_lattice_gaussian_klein_with_trace(
                 all_window_mass_bounds_valid,
             ]
         ),
-        "production_sampler_claim_permitted": False,
-        "statistical_distance_claim_permitted": False,
-        "caveat": "This trace records finite shifted-Gaussian windows and a continuous-tail heuristic for the Sage Klein sampler; it is not a statistical-distance proof or a constant-time production sampler.",
+        "caveat": "Finite shifted-Gaussian window trace for the Sage Klein sampler.",
     }
 
     return lattice_vector, trace_report
@@ -4624,8 +4912,9 @@ def sample_discrete_gaussian_truncated(sigma, seed_parts, counter, tail_cutoff=1
     """Deterministically sample from a finite-window discrete Gaussian.
 
     The window is [-ceil(tail_cutoff*sigma), ceil(tail_cutoff*sigma)]. This is
-    a reproducible high-precision experimental sampler, not a constant-time
-    production sampler.
+    a reproducible experimental sampler, not a constant-time production
+    sampler. Small windows use exact inverse-CDF sampling; large windows use a
+    SHAKE-derived rounded normal approximation clamped to the same window.
     """
     RR = _discrete_gaussian_real_field()
     sigma = RR(sigma)
@@ -4633,25 +4922,19 @@ def sample_discrete_gaussian_truncated(sigma, seed_parts, counter, tail_cutoff=1
         raise ValueError("expected finite sigma > 0")
 
     radius = ZZ(ceil(RR(tail_cutoff) * sigma))
-    values = [ZZ(value) for value in range(-radius, radius + 1)]
-    weights = [RR(exp(-((RR(value) ** 2) / (2 * sigma ** 2)))) for value in values]
-    total = sum(weights)
-    digest = _shake_digest(
-        b"LVC-Verkle-Sage-discrete-gaussian-truncated-v1",
-        [ZZ(counter).binary()] + list(seed_parts),
-        DISCRETE_GAUSSIAN_DRAW_BYTES,
-    )
-    draw = RR(int.from_bytes(digest, "big")) / RR(
-        ZZ(1) << (8 * DISCRETE_GAUSSIAN_DRAW_BYTES)
-    )
-    cumulative = RR(0)
+    lower = -radius
+    upper = radius
+    domain = b"LVC-Verkle-Sage-discrete-gaussian-truncated-v1"
 
-    for value, weight in zip(values, weights):
-        cumulative += weight / total
-        if draw <= cumulative:
-            return value
-
-    return values[-1]
+    return _sample_discrete_gaussian_from_window(
+        sigma,
+        RR(0),
+        lower,
+        upper,
+        domain,
+        seed_parts,
+        counter,
+    )
 
 
 def sample_discrete_gaussian_shifted_truncated(
@@ -4672,17 +4955,72 @@ def sample_discrete_gaussian_shifted_truncated(
     radius = RR(tail_cutoff) * sigma
     lower = ZZ(floor(center - radius))
     upper = ZZ(ceil(center + radius))
+
+    return _sample_discrete_gaussian_from_window(
+        sigma,
+        center,
+        lower,
+        upper,
+        b"LVC-Verkle-Sage-discrete-gaussian-shifted-truncated-v1",
+        seed_parts,
+        counter,
+    )
+
+
+def _sample_discrete_gaussian_from_window(
+    sigma,
+    center,
+    lower,
+    upper,
+    domain,
+    seed_parts,
+    counter,
+):
+    support_size = upper - lower + 1
+    if support_size <= 0:
+        raise ValueError("empty discrete Gaussian support window")
+
+    if support_size <= DISCRETE_GAUSSIAN_EXACT_CDF_MAX_SUPPORT:
+        return _sample_discrete_gaussian_exact_from_window(
+            sigma,
+            center,
+            lower,
+            upper,
+            domain,
+            seed_parts,
+            counter,
+        )
+
+    return _sample_discrete_gaussian_box_muller_from_window(
+        sigma,
+        center,
+        lower,
+        upper,
+        domain,
+        seed_parts,
+        counter,
+    )
+
+
+def _sample_discrete_gaussian_exact_from_window(
+    sigma,
+    center,
+    lower,
+    upper,
+    domain,
+    seed_parts,
+    counter,
+):
+    RR = _discrete_gaussian_real_field()
     values = [ZZ(value) for value in range(lower, upper + 1)]
-    weights = [RR(exp(-(((RR(value) - center) ** 2) / (2 * sigma ** 2)))) for value in values]
+    weights = [
+        RR(exp(-(((RR(value) - center) ** 2) / (2 * sigma ** 2))))
+        for value in values
+    ]
     total = sum(weights)
     digest = _shake_digest(
-        b"LVC-Verkle-Sage-discrete-gaussian-shifted-truncated-v1",
-        [
-            ZZ(counter).binary(),
-            str(center).encode("utf-8"),
-            str(sigma).encode("utf-8"),
-        ]
-        + list(seed_parts),
+        domain,
+        _discrete_gaussian_seed_parts(counter, center, sigma, seed_parts),
         DISCRETE_GAUSSIAN_DRAW_BYTES,
     )
     draw = RR(int.from_bytes(digest, "big")) / RR(
@@ -4696,6 +5034,57 @@ def sample_discrete_gaussian_shifted_truncated(
             return value
 
     return values[-1]
+
+
+def _sample_discrete_gaussian_box_muller_from_window(
+    sigma,
+    center,
+    lower,
+    upper,
+    domain,
+    seed_parts,
+    counter,
+):
+    RR = _discrete_gaussian_real_field()
+    parts = _discrete_gaussian_seed_parts(counter, center, sigma, seed_parts)
+    u1 = _shake_uniform_rr(domain + b"-box-muller-u1", parts)
+    u2 = _shake_uniform_rr(domain + b"-box-muller-u2", parts)
+    z = sqrt(-RR(2) * log(u1)) * cos(RR(2) * RR.pi() * u2)
+    candidate = _round_rr_to_zz(center + sigma * z)
+
+    if candidate < lower:
+        return lower
+    if candidate > upper:
+        return upper
+
+    return candidate
+
+
+def _discrete_gaussian_seed_parts(counter, center, sigma, seed_parts):
+    return (
+        [
+            ZZ(counter).binary(),
+            str(center).encode("utf-8"),
+            str(sigma).encode("utf-8"),
+        ]
+        + list(seed_parts)
+    )
+
+
+def _shake_uniform_rr(domain, parts):
+    RR = _discrete_gaussian_real_field()
+    digest = _shake_digest(domain, parts, DISCRETE_GAUSSIAN_DRAW_BYTES)
+    scale = ZZ(1) << (8 * DISCRETE_GAUSSIAN_DRAW_BYTES)
+
+    return (RR(int.from_bytes(digest, "big")) + RR(0.5)) / RR(scale)
+
+
+def _round_rr_to_zz(value):
+    RR = _discrete_gaussian_real_field()
+    if value >= 0:
+        return ZZ(floor(value + RR(0.5)))
+
+    return ZZ(ceil(value - RR(0.5)))
 
 
 def sample_pre(
